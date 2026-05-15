@@ -6,8 +6,8 @@ use ows_core::{
     ALL_CHAIN_TYPES,
 };
 use ows_signer::{
-    decrypt, encrypt, signer_for_chain, CryptoEnvelope, Curve, HdDeriver, Mnemonic,
-    MnemonicStrength, SecretBytes,
+    decrypt, encrypt, signer_for_chain, signer_for_chain_info, CryptoEnvelope, Curve, HdDeriver,
+    Mnemonic, MnemonicStrength, SecretBytes,
 };
 
 use crate::error::OwsLibError;
@@ -179,7 +179,7 @@ pub fn derive_address(
 ) -> Result<String, OwsLibError> {
     let chain = parse_chain(chain)?;
     let mnemonic = Mnemonic::from_phrase(mnemonic_phrase)?;
-    let signer = signer_for_chain(chain.chain_type);
+    let signer = signer_for_chain_info(&chain);
     let path = signer.default_derivation_path(index.unwrap_or(0));
     let curve = signer.curve();
 
@@ -512,7 +512,7 @@ pub fn sign_transaction(
     // Owner mode: existing passphrase-based signing (unchanged)
     let chain = parse_chain(chain)?;
     let key = decrypt_signing_key(wallet, chain.chain_type, credential, index, vault_path)?;
-    let signer = signer_for_chain(chain.chain_type);
+    let signer = signer_for_chain_info(&chain);
     let signable = signer.extract_signable_bytes(&tx_bytes)?;
     let output = signer.sign_transaction(key.expose(), signable)?;
 
@@ -617,7 +617,7 @@ pub fn sign_message(
     // Owner mode
     let chain = parse_chain(chain)?;
     let key = decrypt_signing_key(wallet, chain.chain_type, credential, index, vault_path)?;
-    let signer = signer_for_chain(chain.chain_type);
+    let signer = signer_for_chain_info(&chain);
     let output = signer.sign_message(key.expose(), &msg_bytes)?;
 
     Ok(SignResult {
@@ -723,7 +723,7 @@ pub fn sign_encode_and_broadcast(
     rpc_url: Option<&str>,
 ) -> Result<SendResult, OwsLibError> {
     let chain = parse_chain(chain)?;
-    let signer = signer_for_chain(chain.chain_type);
+    let signer = signer_for_chain_info(&chain);
 
     // 1. Extract signable portion (strips signature-slot headers for Solana; no-op for others)
     let signable = signer.extract_signable_bytes(tx_bytes)?;
@@ -820,6 +820,7 @@ fn broadcast(chain: ChainType, rpc_url: &str, signed_bytes: &[u8]) -> Result<Str
         ChainType::Xrpl => broadcast_xrpl(rpc_url, signed_bytes),
         ChainType::Nano => broadcast_nano(rpc_url, signed_bytes),
         ChainType::Near => crate::near_rpc::broadcast_tx_commit(rpc_url, signed_bytes),
+        ChainType::Stellar => broadcast_stellar(rpc_url, signed_bytes),
     }
 }
 
@@ -849,6 +850,35 @@ fn broadcast_xrpl(rpc_url: &str, signed_bytes: &[u8]) -> Result<String, OwsLibEr
         .ok_or_else(|| {
             OwsLibError::BroadcastFailed(format!("no hash in XRPL response: {resp_str}"))
         })
+}
+
+fn broadcast_stellar(rpc_url: &str, signed_bytes: &[u8]) -> Result<String, OwsLibError> {
+    use base64::Engine;
+    let b64_tx = base64::engine::general_purpose::STANDARD.encode(signed_bytes);
+    let url = format!("{}/transactions", rpc_url.trim_end_matches('/'));
+
+    let output = std::process::Command::new("curl")
+        .args([
+            "-fsSL",
+            "-X",
+            "POST",
+            "--data-urlencode",
+            &format!("tx={}", b64_tx),
+            &url,
+        ])
+        .output()
+        .map_err(|e| OwsLibError::BroadcastFailed(format!("failed to run curl: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(OwsLibError::BroadcastFailed(format!(
+            "broadcast failed: {stderr} - {stdout}"
+        )));
+    }
+
+    let resp_str = String::from_utf8_lossy(&output.stdout).to_string();
+    extract_json_field(&resp_str, "hash")
 }
 
 fn broadcast_evm(rpc_url: &str, signed_bytes: &[u8]) -> Result<String, OwsLibError> {
@@ -1091,6 +1121,10 @@ fn extract_json_field(json_str: &str, field: &str) -> Result<String, OwsLibError
 mod tests {
     use super::*;
     use ows_core::OwsError;
+    use stellar_xdr::curr::{
+        Limits, Memo, MuxedAccount, Preconditions, Transaction as StellarTransaction,
+        TransactionEnvelope, TransactionExt, TransactionV1Envelope, Uint256, WriteXdr,
+    };
 
     // ---- helpers ----
 
@@ -1125,6 +1159,31 @@ mod tests {
         );
         vault::save_encrypted_wallet(&wallet, Some(vault)).unwrap();
         wallet_to_info(&wallet)
+    }
+
+    fn stellar_unsigned_tx_hex() -> String {
+        let envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
+            tx: StellarTransaction {
+                source_account: MuxedAccount::Ed25519(Uint256::from([7u8; 32])),
+                fee: 100,
+                seq_num: 1_i64.into(),
+                cond: Preconditions::None,
+                memo: Memo::None,
+                operations: Vec::<stellar_xdr::curr::Operation>::new()
+                    .try_into()
+                    .unwrap(),
+                ext: TransactionExt::V0,
+            },
+            signatures: Vec::<stellar_xdr::curr::DecoratedSignature>::new()
+                .try_into()
+                .unwrap(),
+        });
+
+        hex::encode(envelope.to_xdr(Limits::none()).unwrap())
+    }
+
+    fn xrpl_unsigned_tx_hex() -> &'static str {
+        "12000024000000016140000000000F424068400000000000000C7321035D8892C99D4F17B2775EC428ED65B6335A5D588AC2057B81C8C38C59C72B68D98114B22CCE5BFD693ED7FA15B57B6B5370551B7E6DB58314F667B0CA50CC7709A220B0561B85E53A48461FA8"
     }
 
     const TEST_PRIVKEY: &str = "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
@@ -1267,7 +1326,7 @@ mod tests {
         // support generic off-chain message signing without a defined convention.
         // NEAR's V1 sign_message is raw ed25519 (NEP-413 follow-up tracked).
         let chains = [
-            "evm", "solana", "bitcoin", "cosmos", "tron", "ton", "spark", "sui", "near",
+            "evm", "solana", "bitcoin", "cosmos", "tron", "ton", "spark", "sui", "near", "stellar",
         ];
         for chain in &chains {
             let result = sign_message(
@@ -1305,6 +1364,8 @@ mod tests {
         solana_tx.extend_from_slice(&[0u8; 64]); // placeholder signature
         solana_tx.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // message payload
         let solana_tx_hex = hex::encode(&solana_tx);
+        let stellar_tx_hex = stellar_unsigned_tx_hex();
+        let xrpl_tx_hex = xrpl_unsigned_tx_hex();
 
         // NEAR transactions have no envelope; the borsh-encoded Transaction
         // bytes ARE the signable payload. Any non-empty bytes exercise the
@@ -1313,12 +1374,17 @@ mod tests {
 
         let chains = [
             "evm", "solana", "bitcoin", "cosmos", "tron", "ton", "spark", "sui", "xrpl", "near",
+            "stellar",
         ];
         for chain in &chains {
             let tx = if *chain == "solana" {
                 &solana_tx_hex
             } else if *chain == "near" {
                 &near_tx_hex
+            } else if *chain == "stellar" {
+                &stellar_tx_hex
+            } else if *chain == "xrpl" {
+                xrpl_tx_hex
             } else {
                 generic_tx_hex
             };
@@ -1329,6 +1395,35 @@ mod tests {
                 result.err()
             );
         }
+    }
+
+    #[test]
+    fn stellar_testnet_signature_differs_from_pubnet() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+        create_wallet("stellar-networks", None, None, Some(vault)).unwrap();
+
+        let tx_hex = stellar_unsigned_tx_hex();
+        let pubnet = sign_transaction(
+            "stellar-networks",
+            "stellar",
+            &tx_hex,
+            None,
+            None,
+            Some(vault),
+        )
+        .unwrap();
+        let testnet = sign_transaction(
+            "stellar-networks",
+            "stellar-testnet",
+            &tx_hex,
+            None,
+            None,
+            Some(vault),
+        )
+        .unwrap();
+
+        assert_ne!(pubnet.signature, testnet.signature);
     }
 
     #[test]

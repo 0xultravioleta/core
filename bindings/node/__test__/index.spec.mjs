@@ -54,7 +54,7 @@ describe('@open-wallet-standard/core', () => {
 
   it('derives addresses for all chains', () => {
     const phrase = generateMnemonic(12);
-    for (const chain of ['evm', 'solana', 'sui', 'bitcoin', 'cosmos', 'tron', 'ton', 'filecoin', 'xrpl', 'nano', 'near']) {
+    for (const chain of ['evm', 'solana', 'sui', 'bitcoin', 'cosmos', 'tron', 'ton', 'filecoin', 'xrpl', 'nano', 'near', 'stellar']) {
       const addr = deriveAddress(phrase, chain);
       assert.ok(addr.length > 0, `address should be non-empty for ${chain}`);
     }
@@ -62,10 +62,10 @@ describe('@open-wallet-standard/core', () => {
 
   // ---- Universal wallet lifecycle ----
 
-  it('creates a universal wallet with 12 accounts', () => {
+  it('creates a universal wallet with 13 accounts', () => {
     const wallet = createWallet('lifecycle-test', undefined, 12, vaultDir);
     assert.equal(wallet.name, 'lifecycle-test');
-    assert.equal(wallet.accounts.length, 12);
+    assert.equal(wallet.accounts.length, 13);
 
     const chainIds = wallet.accounts.map((a) => a.chainId);
     assert.ok(chainIds.some((c) => c.startsWith('eip155:')));
@@ -80,6 +80,7 @@ describe('@open-wallet-standard/core', () => {
     assert.ok(chainIds.some((c) => c.startsWith('xrpl:')));
     assert.ok(chainIds.some((c) => c.startsWith('nano:')));
     assert.ok(chainIds.some((c) => c.startsWith('near:')));
+    assert.ok(chainIds.some((c) => c.startsWith('stellar:')));
 
     // List
     const wallets = listWallets(vaultDir);
@@ -113,7 +114,7 @@ describe('@open-wallet-standard/core', () => {
 
     const wallet = importWalletMnemonic('mn-import', phrase, undefined, undefined, vaultDir);
     assert.equal(wallet.name, 'mn-import');
-    assert.equal(wallet.accounts.length, 12);
+    assert.equal(wallet.accounts.length, 13);
 
     const evmAcct = wallet.accounts.find((a) => a.chainId.startsWith('eip155:'));
     assert.equal(evmAcct.address, expectedEvm);
@@ -131,7 +132,7 @@ describe('@open-wallet-standard/core', () => {
     const wallet = importWalletPrivateKey('pk-secp', privkey, undefined, vaultDir, 'evm');
 
     assert.equal(wallet.name, 'pk-secp');
-    assert.equal(wallet.accounts.length, 12, 'should have all 12 chain accounts');
+    assert.equal(wallet.accounts.length, 13, 'should have all 13 chain accounts');
 
     // Sign on EVM (provided key's curve)
     const evmSig = signMessage('pk-secp', 'evm', 'hello', undefined, undefined, undefined, vaultDir);
@@ -155,7 +156,7 @@ describe('@open-wallet-standard/core', () => {
     const privkey = '9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60';
     const wallet = importWalletPrivateKey('pk-ed', privkey, undefined, vaultDir, 'solana');
 
-    assert.equal(wallet.accounts.length, 12);
+    assert.equal(wallet.accounts.length, 13);
 
     // Sign on Solana (provided key)
     const solSig = signMessage('pk-ed', 'solana', 'hello', undefined, undefined, undefined, vaultDir);
@@ -183,7 +184,7 @@ describe('@open-wallet-standard/core', () => {
     );
 
     assert.equal(wallet.name, 'pk-both');
-    assert.equal(wallet.accounts.length, 12, 'should have all 12 chain accounts');
+    assert.equal(wallet.accounts.length, 13, 'should have all 13 chain accounts');
 
     // Sign on EVM (secp256k1 key)
     const evmSig = signMessage('pk-both', 'evm', 'hello', undefined, undefined, undefined, vaultDir);

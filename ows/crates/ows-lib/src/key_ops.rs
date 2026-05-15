@@ -3,7 +3,8 @@ use std::path::Path;
 
 use ows_core::{ApiKeyFile, EncryptedWallet, OwsError};
 use ows_signer::{
-    decrypt, eip712, encrypt_with_hkdf, signer_for_chain, CryptoEnvelope, SecretBytes,
+    decrypt, eip712, encrypt_with_hkdf, signer_for_chain, signer_for_chain_info, CryptoEnvelope,
+    SecretBytes,
 };
 
 use crate::error::OwsLibError;
@@ -97,7 +98,7 @@ pub fn sign_with_api_key(
     )?;
 
     // 7. Sign (extract signable portion first — e.g. strips Solana sig-slot headers)
-    let signer = signer_for_chain(chain.chain_type);
+    let signer = signer_for_chain_info(chain);
     let signable = signer.extract_signable_bytes(tx_bytes)?;
     let output = signer.sign_transaction(key.expose(), signable)?;
 

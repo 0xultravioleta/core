@@ -6,6 +6,7 @@ pub mod nano;
 pub mod near;
 pub mod solana;
 pub mod spark;
+pub mod stellar;
 pub mod sui;
 pub mod ton;
 pub mod tron;
@@ -19,16 +20,26 @@ pub use self::nano::NanoSigner;
 pub use self::near::NearSigner;
 pub use self::solana::SolanaSigner;
 pub use self::spark::SparkSigner;
+pub use self::stellar::StellarSigner;
 pub use self::sui::SuiSigner;
 pub use self::ton::TonSigner;
 pub use self::tron::TronSigner;
 pub use self::xrpl::XrplSigner;
 
 use crate::traits::ChainSigner;
-use ows_core::ChainType;
+use ows_core::{Chain, ChainType};
 
 /// Get a default signer for a given chain type.
 pub fn signer_for_chain(chain: ChainType) -> Box<dyn ChainSigner> {
+    signer_for_chain_id(chain, None)
+}
+
+/// Get a signer for a specific chain ID when network-specific behavior matters.
+pub fn signer_for_chain_info(chain: &Chain) -> Box<dyn ChainSigner> {
+    signer_for_chain_id(chain.chain_type, Some(chain.chain_id))
+}
+
+fn signer_for_chain_id(chain: ChainType, chain_id: Option<&str>) -> Box<dyn ChainSigner> {
     match chain {
         ChainType::Evm => Box::new(EvmSigner),
         ChainType::Solana => Box::new(SolanaSigner),
@@ -42,5 +53,9 @@ pub fn signer_for_chain(chain: ChainType) -> Box<dyn ChainSigner> {
         ChainType::Xrpl => Box::new(XrplSigner),
         ChainType::Nano => Box::new(NanoSigner),
         ChainType::Near => Box::new(NearSigner),
+        ChainType::Stellar => match chain_id {
+            Some("stellar:testnet") => Box::new(StellarSigner::testnet()),
+            _ => Box::new(StellarSigner::mainnet()),
+        },
     }
 }

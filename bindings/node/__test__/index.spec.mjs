@@ -628,4 +628,18 @@ describe('@open-wallet-standard/core', () => {
     deletePolicy('test-hash-base-only', vaultDir);
     deleteWallet(wallet.id, vaultDir);
   });
+
+  it('throws instead of crashing the process on a malformed transaction', () => {
+    // A single 0x00 makes the XRPL signer panic deep in xrpl-rust. Without
+    // #[napi(catch_unwind)] on the signing entry points that panic aborts the
+    // whole Node process (exit 134, no catchable error). With it, the panic
+    // must surface as an ordinary JS exception this test can catch.
+    const wallet = createWallet('panic-guard', undefined, 12, vaultDir);
+    assert.throws(() =>
+      signTransaction('panic-guard', 'xrpl', '00', undefined, undefined, vaultDir),
+    );
+    // The addon is still alive and usable after the caught panic.
+    assert.ok(getWallet('panic-guard', vaultDir));
+    deleteWallet('panic-guard', vaultDir);
+  });
 });

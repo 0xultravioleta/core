@@ -193,7 +193,7 @@ pub fn rename_wallet(
 }
 
 /// Sign a transaction. Returns hex-encoded signature.
-#[napi]
+#[napi(catch_unwind)]
 pub fn sign_transaction(
     wallet: String,
     chain: String,
@@ -218,7 +218,7 @@ pub fn sign_transaction(
 }
 
 /// Sign a message. Returns hex-encoded signature.
-#[napi]
+#[napi(catch_unwind)]
 pub fn sign_message(
     wallet: String,
     chain: String,
@@ -245,7 +245,7 @@ pub fn sign_message(
 }
 
 /// Sign EIP-712 typed structured data (EVM only). Returns hex-encoded signature.
-#[napi]
+#[napi(catch_unwind)]
 pub fn sign_typed_data(
     wallet: String,
     chain: String,
@@ -270,7 +270,7 @@ pub fn sign_typed_data(
 }
 
 /// Sign a raw 32-byte hash on a secp256k1-backed chain. Returns hex-encoded signature.
-#[napi]
+#[napi(catch_unwind)]
 pub fn sign_hash(
     wallet: String,
     chain: String,
@@ -295,7 +295,7 @@ pub fn sign_hash(
 }
 
 /// Sign an EIP-7702 authorization tuple. Returns hex-encoded signature.
-#[napi]
+#[napi(catch_unwind)]
 pub fn sign_authorization(
     wallet: String,
     chain: String,
@@ -425,7 +425,7 @@ pub fn revoke_api_key(id: String, vault_path_opt: Option<String>) -> Result<()> 
 }
 
 /// Sign and broadcast a transaction. Returns the transaction hash.
-#[napi]
+#[napi(catch_unwind)]
 pub fn sign_and_send(
     wallet: String,
     chain: String,

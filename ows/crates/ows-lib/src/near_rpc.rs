@@ -15,6 +15,7 @@ fn near_rpc_call(
 ) -> Result<serde_json::Value, OwsLibError> {
     let body_str = body.to_string();
     let output = Command::new("curl")
+        .args(crate::http::curl_timeout_args())
         .args([
             "-fsSL",
             "-X",

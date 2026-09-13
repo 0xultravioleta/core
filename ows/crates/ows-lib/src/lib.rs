@@ -1,4 +1,5 @@
 pub mod error;
+mod http;
 pub mod key_ops;
 pub mod key_store;
 pub mod migrate;

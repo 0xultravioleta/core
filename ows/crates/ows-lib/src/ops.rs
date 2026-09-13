@@ -884,6 +884,7 @@ fn broadcast_bitcoin(rpc_url: &str, signed_bytes: &[u8]) -> Result<String, OwsLi
     let hex_tx = hex::encode(signed_bytes);
     let url = format!("{}/tx", rpc_url.trim_end_matches('/'));
     let output = Command::new("curl")
+        .args(crate::http::curl_timeout_args())
         .args([
             "-fsSL",
             "-X",
@@ -1049,6 +1050,7 @@ fn broadcast_nano(rpc_url: &str, signed_bytes: &[u8]) -> Result<String, OwsLibEr
 
 fn curl_post_json(url: &str, body: &str) -> Result<String, OwsLibError> {
     let output = Command::new("curl")
+        .args(crate::http::curl_timeout_args())
         .args([
             "-fsSL",
             "-X",
@@ -1091,6 +1093,40 @@ fn extract_json_field(json_str: &str, field: &str) -> Result<String, OwsLibError
 mod tests {
     use super::*;
     use ows_core::OwsError;
+
+    /// A hung endpoint (accepts the connection, never replies) must not hang a
+    /// broadcast forever: the curl timeout policy has to turn it into an error.
+    #[test]
+    fn broadcast_curl_times_out_on_a_hung_endpoint() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 64];
+                let _ = sock.read(&mut buf);
+                // Never respond: hold the connection open past the client deadline.
+                std::thread::sleep(Duration::from_secs(30));
+            }
+        });
+
+        std::env::set_var("OWS_HTTP_TIMEOUT_SECS", "2");
+        let url = format!("http://127.0.0.1:{port}");
+        let start = Instant::now();
+        let res = curl_post_json(&url, "{}");
+        let elapsed = start.elapsed();
+        std::env::remove_var("OWS_HTTP_TIMEOUT_SECS");
+
+        assert!(res.is_err(), "expected a timeout error, got {res:?}");
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "curl hung for {elapsed:?}; the broadcast timeout was not enforced"
+        );
+        drop(handle);
+    }
 
     // ---- helpers ----
 

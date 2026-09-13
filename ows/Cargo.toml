@@ -1,3 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/ows-core", "crates/ows-signer", "crates/ows-lib", "crates/ows-pay", "crates/ows-cli"]
+
+[profile.release]
+# Turn silent integer wraparound into a panic in shipped artifacts.
+overflow-checks = true

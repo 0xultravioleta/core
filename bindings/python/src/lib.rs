@@ -10,6 +10,21 @@ fn map_err(e: ows_lib::OwsLibError) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
 }
 
+/// Run a signer call, turning both its normal errors and any internal panic into
+/// a catchable Python exception. A malformed transaction can panic a signer deep
+/// in a third-party crate; without this guard pyo3 surfaces that as a
+/// `PanicException` (a `BaseException` that escapes `except Exception`). Catch it
+/// here so callers get an ordinary exception and the interpreter stays usable.
+fn call_signer<T>(f: impl FnOnce() -> Result<T, ows_lib::OwsLibError>) -> PyResult<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(map_err(e)),
+        Err(_) => Err(PyRuntimeError::new_err(
+            "signing failed: the input caused an internal panic",
+        )),
+    }
+}
+
 /// Generate a new BIP-39 mnemonic phrase.
 #[pyfunction]
 #[pyo3(signature = (words=12))]
@@ -156,15 +171,16 @@ fn sign_transaction(
     index: Option<u32>,
     vault_path_opt: Option<String>,
 ) -> PyResult<PyObject> {
-    let result = ows_lib::sign_transaction(
-        wallet,
-        chain,
-        tx_hex,
-        passphrase,
-        index,
-        vault_path(vault_path_opt).as_deref(),
-    )
-    .map_err(map_err)?;
+    let result = call_signer(|| {
+        ows_lib::sign_transaction(
+            wallet,
+            chain,
+            tx_hex,
+            passphrase,
+            index,
+            vault_path(vault_path_opt).as_deref(),
+        )
+    })?;
 
     Python::with_gil(|py| {
         let dict = pyo3::types::PyDict::new(py);
@@ -186,16 +202,17 @@ fn sign_message(
     index: Option<u32>,
     vault_path_opt: Option<String>,
 ) -> PyResult<PyObject> {
-    let result = ows_lib::sign_message(
-        wallet,
-        chain,
-        message,
-        passphrase,
-        encoding,
-        index,
-        vault_path(vault_path_opt).as_deref(),
-    )
-    .map_err(map_err)?;
+    let result = call_signer(|| {
+        ows_lib::sign_message(
+            wallet,
+            chain,
+            message,
+            passphrase,
+            encoding,
+            index,
+            vault_path(vault_path_opt).as_deref(),
+        )
+    })?;
 
     Python::with_gil(|py| {
         let dict = pyo3::types::PyDict::new(py);
@@ -216,15 +233,16 @@ fn sign_typed_data(
     index: Option<u32>,
     vault_path_opt: Option<String>,
 ) -> PyResult<PyObject> {
-    let result = ows_lib::sign_typed_data(
-        wallet,
-        chain,
-        typed_data_json,
-        passphrase,
-        index,
-        vault_path(vault_path_opt).as_deref(),
-    )
-    .map_err(map_err)?;
+    let result = call_signer(|| {
+        ows_lib::sign_typed_data(
+            wallet,
+            chain,
+            typed_data_json,
+            passphrase,
+            index,
+            vault_path(vault_path_opt).as_deref(),
+        )
+    })?;
 
     Python::with_gil(|py| {
         let dict = pyo3::types::PyDict::new(py);
@@ -245,15 +263,16 @@ fn sign_hash(
     index: Option<u32>,
     vault_path_opt: Option<String>,
 ) -> PyResult<PyObject> {
-    let result = ows_lib::sign_hash(
-        wallet,
-        chain,
-        hash_hex,
-        passphrase,
-        index,
-        vault_path(vault_path_opt).as_deref(),
-    )
-    .map_err(map_err)?;
+    let result = call_signer(|| {
+        ows_lib::sign_hash(
+            wallet,
+            chain,
+            hash_hex,
+            passphrase,
+            index,
+            vault_path(vault_path_opt).as_deref(),
+        )
+    })?;
 
     Python::with_gil(|py| {
         let dict = pyo3::types::PyDict::new(py);
@@ -275,16 +294,17 @@ fn sign_authorization(
     index: Option<u32>,
     vault_path_opt: Option<String>,
 ) -> PyResult<PyObject> {
-    let result = ows_lib::sign_authorization(
-        wallet,
-        chain,
-        address,
-        nonce,
-        passphrase,
-        index,
-        vault_path(vault_path_opt).as_deref(),
-    )
-    .map_err(map_err)?;
+    let result = call_signer(|| {
+        ows_lib::sign_authorization(
+            wallet,
+            chain,
+            address,
+            nonce,
+            passphrase,
+            index,
+            vault_path(vault_path_opt).as_deref(),
+        )
+    })?;
 
     Python::with_gil(|py| {
         let dict = pyo3::types::PyDict::new(py);
@@ -306,16 +326,17 @@ fn sign_and_send(
     rpc_url: Option<&str>,
     vault_path_opt: Option<String>,
 ) -> PyResult<PyObject> {
-    let result = ows_lib::sign_and_send(
-        wallet,
-        chain,
-        tx_hex,
-        passphrase,
-        index,
-        rpc_url,
-        vault_path(vault_path_opt).as_deref(),
-    )
-    .map_err(map_err)?;
+    let result = call_signer(|| {
+        ows_lib::sign_and_send(
+            wallet,
+            chain,
+            tx_hex,
+            passphrase,
+            index,
+            rpc_url,
+            vault_path(vault_path_opt).as_deref(),
+        )
+    })?;
 
     Python::with_gil(|py| {
         let dict = pyo3::types::PyDict::new(py);

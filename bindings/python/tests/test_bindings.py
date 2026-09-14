@@ -362,3 +362,18 @@ def test_sign_typed_data_respects_allowed_typed_data_contracts(vault_dir):
     ows.revoke_api_key(key["id"], vault_path_opt=vault_dir)
     ows.delete_policy("td-contract-only", vault_path_opt=vault_dir)
     ows.delete_wallet(wallet["id"], vault_path_opt=vault_dir)
+
+
+def test_malformed_transaction_raises_not_crashes(vault_dir):
+    # A single 0x00 panics the XRPL signer deep in a third-party crate. Without
+    # the panic guard in the binding, pyo3 surfaces that as a PanicException (a
+    # BaseException that escapes `except Exception`); with it, the caller gets an
+    # ordinary catchable exception and the interpreter stays usable. This is the
+    # same class of panic that a malformed Cardano address triggers once Cardano
+    # lands, so the guard covers it there too.
+    ows.create_wallet("panic-guard", vault_path_opt=vault_dir)
+    with pytest.raises(Exception):
+        ows.sign_transaction("panic-guard", "xrpl", "00", vault_path_opt=vault_dir)
+    # The interpreter survived the panic and the binding is still usable.
+    assert ows.get_wallet("panic-guard", vault_path_opt=vault_dir) is not None
+    ows.delete_wallet("panic-guard", vault_path_opt=vault_dir)

@@ -1369,4 +1369,230 @@ else:
             allowed.err()
         );
     }
+
+    // ================================================================
+    // NEAR: decoded transaction context + near_transaction_limits
+    // ================================================================
+
+    /// near-api-js 7.3.1: `alice.near` -> `ft.example.near` with storage_deposit
+    /// (1250000000000000000000 yocto), ft_transfer (1 yocto) and transfer(10),
+    /// signed by the RFC 8032 vector 1 key.
+    const NEAR_TX: &str = "0a000000616c6963652e6e65617200d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a07\
+        000000000000000f00000066742e6578616d706c652e6e656172a0a1a2a3a4a5a6a7a8a9aaabacadaeafa0a1a2a3a4a5\
+        a6a7a8a9aaabacadaeaf03000000020f00000073746f726167655f6465706f7369741b0000007b226163636f756e745f\
+        6964223a22616c6963652e6e656172227d00e057eb481b00000000485637193cc34300000000000000020b0000006674\
+        5f7472616e73666572280000007b2272656365697665725f6964223a22626f622e6e656172222c22616d6f756e74223a\
+        223432227d00e057eb481b000001000000000000000000000000000000030a000000000000000000000000000000";
+    const NEAR_TX_SIGNATURE: &str = "c0b4334753921bab761842bea9f215a02926612c5e8b67f81488f3f9e2f9f2b74d91502cbf98cba7095aa682e8a8059f1e5a3170c11798ce71caf50329dc570b";
+
+    /// A wallet whose NEAR key is the RFC 8032 vector 1 seed, plus an API key
+    /// bound to `rules`. Returns (wallet id, token).
+    fn near_agent(vault: &Path, rules: Vec<ows_core::PolicyRule>) -> (String, String) {
+        let wallet = crate::ops::import_wallet_private_key(
+            "near-agent",
+            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+            Some("near"),
+            None,
+            Some(vault),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let policy = ows_core::Policy {
+            id: "near-policy".to_string(),
+            name: "near policy".to_string(),
+            version: 1,
+            created_at: "2026-03-22T00:00:00Z".to_string(),
+            rules,
+            executable: None,
+            config: None,
+            action: ows_core::PolicyAction::Deny,
+        };
+        policy_store::save_policy(&policy, Some(vault)).unwrap();
+        let (token, _) = create_api_key(
+            "near-agent-key",
+            std::slice::from_ref(&wallet.id),
+            &["near-policy".to_string()],
+            "",
+            None,
+            Some(vault),
+        )
+        .unwrap();
+        (wallet.id, token)
+    }
+
+    fn near_limits(max_deposit: &str) -> ows_core::PolicyRule {
+        ows_core::PolicyRule::NearTransactionLimits(ows_core::NearTransactionLimits {
+            receivers: Some(vec!["ft.example.near".into()]),
+            methods: Some(vec!["storage_deposit".into(), "ft_transfer".into()]),
+            max_deposit: Some(max_deposit.into()),
+            actions: None,
+        })
+    }
+
+    #[test]
+    fn near_transaction_limits_gate_agent_transaction_signing() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+        let (wallet_id, token) = near_agent(vault, vec![near_limits("1250000000000000000011")]);
+
+        let signed = crate::ops::sign_transaction(
+            &wallet_id,
+            "near",
+            NEAR_TX,
+            Some(&token),
+            None,
+            Some(vault),
+        )
+        .unwrap();
+        assert_eq!(signed.signature, NEAR_TX_SIGNATURE);
+
+        // One yoctoNEAR less of headroom and the same transaction is refused.
+        let dir2 = tempfile::tempdir().unwrap();
+        let (wallet_id, token) =
+            near_agent(dir2.path(), vec![near_limits("1250000000000000000010")]);
+        let err = crate::ops::sign_transaction(
+            &wallet_id,
+            "near",
+            NEAR_TX,
+            Some(&token),
+            None,
+            Some(dir2.path()),
+        )
+        .unwrap_err();
+        match err {
+            OwsLibError::Core(OwsError::PolicyDenied { reason, .. }) => {
+                assert!(reason.contains("exceeds max_deposit"), "{reason}");
+            }
+            other => panic!("expected PolicyDenied, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn agent_near_signing_requires_a_decodable_transaction() {
+        // Even without a NEAR rule, an API token only signs bytes that decode as
+        // a NEAR transaction, so every policy sees what it is authorizing.
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+        let (wallet_id, token) = near_agent(
+            vault,
+            vec![ows_core::PolicyRule::AllowedChains {
+                chain_ids: vec!["near:mainnet".into()],
+            }],
+        );
+        let err = crate::ops::sign_transaction(
+            &wallet_id,
+            "near",
+            &"42".repeat(80),
+            Some(&token),
+            None,
+            Some(vault),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                OwsLibError::Signer(ows_signer::SignerError::InvalidTransaction(_))
+            ),
+            "{err}"
+        );
+
+        // The owner passphrase path does not decode and keeps signing raw bytes.
+        let owner = crate::ops::sign_transaction(
+            &wallet_id,
+            "near",
+            &"42".repeat(80),
+            Some(""),
+            None,
+            Some(vault),
+        );
+        assert!(owner.is_ok(), "{:?}", owner.err());
+    }
+
+    #[test]
+    fn near_transaction_limits_block_raw_32_byte_agent_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+        let (wallet_id, token) = near_agent(vault, vec![near_limits("0")]);
+
+        // sha256(NEAR_TX) signed raw would be a valid signature for NEAR_TX.
+        let digest = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
+            hex::decode(NEAR_TX).unwrap(),
+        ));
+        let err = crate::ops::sign_message(
+            &wallet_id,
+            "near",
+            &digest,
+            Some(&token),
+            Some("hex"),
+            None,
+            None,
+            Some(vault),
+        )
+        .unwrap_err();
+        match err {
+            OwsLibError::Core(OwsError::PolicyDenied { reason, .. }) => {
+                assert!(reason.contains("32 raw bytes"), "{reason}");
+            }
+            other => panic!("expected PolicyDenied, got: {other}"),
+        }
+
+        // Messages of any other length still sign.
+        let ok = crate::ops::sign_message(
+            &wallet_id,
+            "near",
+            "hello near",
+            Some(&token),
+            None,
+            None,
+            None,
+            Some(vault),
+        );
+        assert!(ok.is_ok(), "{:?}", ok.err());
+    }
+
+    #[test]
+    fn near_transaction_limits_close_the_shared_key_route_through_solana() {
+        // A wallet imported from a raw Ed25519 key signs Solana with the NEAR key,
+        // and Solana message signing is raw Ed25519: signing sha256(NEAR_TX) there
+        // yields the NEAR transaction signature itself.
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+        let (wallet_id, token) = near_agent(vault, vec![near_limits("0")]);
+        let digest = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
+            hex::decode(NEAR_TX).unwrap(),
+        ));
+
+        let owner = crate::ops::sign_message(
+            &wallet_id,
+            "solana",
+            &digest,
+            Some(""),
+            Some("hex"),
+            None,
+            None,
+            Some(vault),
+        )
+        .unwrap();
+        assert_eq!(owner.signature, NEAR_TX_SIGNATURE, "the route is real");
+
+        let err = crate::ops::sign_message(
+            &wallet_id,
+            "solana",
+            &digest,
+            Some(&token),
+            Some("hex"),
+            None,
+            None,
+            Some(vault),
+        )
+        .unwrap_err();
+        match err {
+            OwsLibError::Core(OwsError::PolicyDenied { reason, .. }) => {
+                assert!(reason.contains("32 raw bytes"), "{reason}");
+            }
+            other => panic!("expected PolicyDenied, got: {other}"),
+        }
+    }
 }

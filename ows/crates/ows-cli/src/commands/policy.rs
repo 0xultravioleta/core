@@ -68,6 +68,22 @@ pub fn show(id: &str) -> Result<(), CliError> {
                 ows_core::PolicyRule::AllowedTypedDataContracts { contracts } => {
                     format!("  allowed_typed_data_contracts: {}", contracts.join(", "))
                 }
+                ows_core::PolicyRule::NearTransactionLimits(limits) => {
+                    let list = |v: &Option<Vec<String>>| {
+                        v.as_ref().map_or("any".to_string(), |v| v.join(", "))
+                    };
+                    let actions = limits.actions.as_ref().map_or_else(
+                        || ows_core::NearTransactionLimits::DEFAULT_ACTIONS.join(", "),
+                        |v| v.join(", "),
+                    );
+                    format!(
+                        "  near_transaction_limits: receivers [{}], methods [{}], actions [{}], max_deposit {}",
+                        list(&limits.receivers),
+                        list(&limits.methods),
+                        actions,
+                        limits.max_deposit.as_deref().unwrap_or("any"),
+                    )
+                }
             };
             println!("{desc}");
         }

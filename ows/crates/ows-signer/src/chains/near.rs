@@ -1,8 +1,11 @@
 use crate::curve::Curve;
 use crate::traits::{ChainSigner, SignOutput, SignerError};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use ows_core::policy::TransactionContext;
 use ows_core::ChainType;
 use sha2::{Digest, Sha256};
+
+pub mod decode;
 
 /// NEAR Protocol chain signer (Ed25519 over Borsh-serialized transactions).
 ///
@@ -126,6 +129,25 @@ impl ChainSigner for NearSigner {
             return Err(SignerError::InvalidTransaction("empty transaction".into()));
         }
         Ok(tx_bytes)
+    }
+
+    /// Decode the Borsh `Transaction` so policies see what it does. The decoded
+    /// fields go in `chain_extra` (`kind: "transaction"`); see [`decode`].
+    /// `effects` stays empty: a NEAR transaction's balance change is not fully
+    /// determined by its bytes (gas refunds, `delete_account`, contract logic).
+    /// Undecodable bytes are an error, so an API token cannot sign them.
+    fn make_transaction_context(
+        &self,
+        tx_bytes: &[u8],
+        _rpc_url: Option<&str>,
+    ) -> Result<TransactionContext, SignerError> {
+        let tx = decode::Transaction::from_borsh(tx_bytes)?;
+        Ok(TransactionContext {
+            effects: vec![],
+            raw_hex: hex::encode(tx_bytes),
+            data: None,
+            chain_extra: Some(tx.to_json()?),
+        })
     }
 
     fn default_derivation_path(&self, index: u32) -> String {

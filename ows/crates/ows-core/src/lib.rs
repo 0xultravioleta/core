@@ -23,8 +23,8 @@ pub use chain::{
 pub use config::Config;
 pub use error::{OwsError, OwsErrorCode};
 pub use policy::{
-    Policy, PolicyAction, PolicyContext, PolicyRequestType, PolicyResult, PolicyRule,
-    TypedDataContext,
+    NearTransactionLimits, Policy, PolicyAction, PolicyContext, PolicyRequestType, PolicyResult,
+    PolicyRule, TypedDataContext,
 };
 pub use types::*;
 pub use wallet_file::*;

@@ -20,6 +20,41 @@ pub enum PolicyRule {
     /// Deny typed data signing if `domain.verifyingContract` is not in the allowlist.
     /// Passes through for non-typed-data signing operations.
     AllowedTypedDataContracts { contracts: Vec<String> },
+
+    /// Constrain what an API key may sign on NEAR (`near:*` chains): which
+    /// receivers, function-call methods and action types a transaction may
+    /// use, and how much it may attach. Also refuses 32-byte raw Ed25519
+    /// payloads on chains that can share the NEAR key (Solana, TON); every
+    /// other chain passes through.
+    NearTransactionLimits(NearTransactionLimits),
+}
+
+/// Fields of [`PolicyRule::NearTransactionLimits`]. Every field is optional;
+/// an omitted list does not restrict, except `actions`, which defaults to
+/// [`NearTransactionLimits::DEFAULT_ACTIONS`]. Unknown fields are rejected so a
+/// misspelled limit cannot silently allow everything.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NearTransactionLimits {
+    /// Allowed transaction receivers (`receiver_id`), compared exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receivers: Option<Vec<String>>,
+    /// Allowed `function_call` method names, compared exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub methods: Option<Vec<String>>,
+    /// Most yoctoNEAR the transaction may attach in total (`transfer` plus
+    /// `function_call` deposits), as a decimal string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_deposit: Option<String>,
+    /// Allowed action types (`transfer`, `function_call`, `add_key`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<Vec<String>>,
+}
+
+impl NearTransactionLimits {
+    /// Action types allowed when `actions` is omitted: moving value and calling
+    /// contracts, but nothing that changes the account's keys, code or existence.
+    pub const DEFAULT_ACTIONS: &'static [&'static str] = &["transfer", "function_call"];
 }
 
 /// A stored policy definition.
@@ -364,6 +399,52 @@ mod tests {
 
         let deserialized: PolicyRule = serde_json::from_value(json).unwrap();
         assert_eq!(deserialized, rule);
+    }
+
+    #[test]
+    fn test_policy_rule_serde_near_transaction_limits() {
+        let json = serde_json::json!({
+            "type": "near_transaction_limits",
+            "receivers": ["ft.example.near"],
+            "methods": ["ft_transfer"],
+            "max_deposit": "1",
+            "actions": ["function_call"],
+        });
+        let rule: PolicyRule = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(
+            rule,
+            PolicyRule::NearTransactionLimits(NearTransactionLimits {
+                receivers: Some(vec!["ft.example.near".into()]),
+                methods: Some(vec!["ft_transfer".into()]),
+                max_deposit: Some("1".into()),
+                actions: Some(vec!["function_call".into()]),
+            })
+        );
+        assert_eq!(serde_json::to_value(&rule).unwrap(), json);
+
+        // Every limit is optional; omitted ones are not serialized.
+        let bare: PolicyRule =
+            serde_json::from_value(serde_json::json!({ "type": "near_transaction_limits" }))
+                .unwrap();
+        assert_eq!(
+            bare,
+            PolicyRule::NearTransactionLimits(NearTransactionLimits::default())
+        );
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            serde_json::json!({ "type": "near_transaction_limits" })
+        );
+    }
+
+    #[test]
+    fn test_near_transaction_limits_rejects_unknown_fields() {
+        // A misspelled limit must fail to parse rather than restrict nothing.
+        let err = serde_json::from_value::<PolicyRule>(serde_json::json!({
+            "type": "near_transaction_limits",
+            "receiver": ["ft.example.near"],
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
     }
 
     #[test]

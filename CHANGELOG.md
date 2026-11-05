@@ -27,6 +27,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   `verify_sign_message_address` and `transaction_context_needs_rpc`, all defaulted
 - Optional `address` argument on `sign_message` / `sign_typed_data`, which refuses to
   sign for an address the key does not derive (`AddressMismatch`)
+- NEAR transaction context for policies: in agent mode the NEAR signer decodes the Borsh
+  `Transaction` (all action types near-api-js 7.x encodes) into `chain_extra`
+  (`kind: "transaction"`, `receiver_id`, `actions` with method names and deposits,
+  `total_deposit` in yoctoNEAR)
+- `near_transaction_limits` declarative rule: allowed receivers, function-call methods and
+  action types (default `transfer` and `function_call`), and a `max_deposit` cap (counting
+  deposits a relayed delegate action makes the relayer prepay), for `near:` chains. It also
+  refuses 32-byte raw Ed25519 payloads on NEAR, Solana and TON, which could otherwise carry a
+  NEAR transaction signature past it (an imported Ed25519 key is shared across those chains)
 
 ### Breaking
 
@@ -47,6 +56,9 @@ Policy contract, as executable policies see it on stdin:
 - `TransactionEffect.diff` amounts are signed decimal **strings**, not integers: wei
   overflows an `i64` above ~9.22 ETH, and a JSON integer above 2^53 does not survive
   `JSON.parse`. Parse with `int()` / `BigInt()`.
+- On NEAR, an API token only signs bytes that decode as a Borsh `Transaction`
+  (`sign_transaction` / `sign_and_send` decode before the policy pass); the owner passphrase
+  path still signs any bytes.
 
 Rust API:
 
@@ -60,8 +72,8 @@ Rust API:
   `Result<Box<dyn ChainSigner>, SignerError>`: Cardano rejects a `cip34:` reference it
   does not know (`SignerError::UnsupportedChain`) rather than assuming mainnet
 - New enum variants break downstream exhaustive `match`es: `ChainType::Cardano`,
-  `Curve::Ed25519Bip32`, `SignerError::{RpcError, UnsupportedChain}`, and
-  `PayErrorCode::InvalidData`
+  `Curve::Ed25519Bip32`, `SignerError::{RpcError, UnsupportedChain}`,
+  `PayErrorCode::InvalidData`, and `PolicyRule::NearTransactionLimits`
 
 Node and Python SDKs — arity changes only. Every new parameter is at the **end** of
 the list, so existing positional calls are unaffected:

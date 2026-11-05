@@ -108,7 +108,7 @@ Delete the API key file. The encrypted secret copy is gone. `SHA256(T)` matches 
 
 ## Declarative Policy Rules
 
-These rule types are evaluated in-process (microseconds, no subprocess). Per-transaction value caps, recipient allowlists, and cumulative daily spend are **not** implemented as declarative rules; use an **`executable`** policy (see below) if you need that level of control.
+These rule types are evaluated in-process (microseconds, no subprocess). Apart from `near_transaction_limits` on NEAR, per-transaction value caps, recipient allowlists, and cumulative daily spend are **not** implemented as declarative rules; use an **`executable`** policy (see below) if you need that level of control.
 
 ### `allowed_chains`
 
@@ -156,6 +156,38 @@ Restricts which smart contracts an API key can sign EIP-712 typed data for. The 
   "action": "deny"
 }
 ```
+
+### `near_transaction_limits`
+
+Restricts what an API key can sign on NEAR (`near:*` chains). The rule reads the transaction the NEAR signer decodes into `transaction.chain_extra` (see [`transaction`](#transaction-optional)).
+
+```json
+{
+  "type": "near_transaction_limits",
+  "receivers": ["usdc.example.near", "escrow.example.near"],
+  "methods": ["ft_transfer", "ft_transfer_call", "storage_deposit"],
+  "max_deposit": "1250000000000000000000",
+  "actions": ["function_call"]
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `receivers` | any | The transaction's `receiver_id` must be one of these (exact match). |
+| `methods` | any | Every `function_call` action's `method_name` must be one of these (exact match). |
+| `max_deposit` | none | The yoctoNEAR the transaction attaches in total — `transfer` deposits plus `function_call` deposits — must not exceed this decimal string. Inclusive. |
+| `actions` | `["transfer", "function_call"]` | Every action's type must be one of these: `create_account`, `deploy_contract`, `function_call`, `transfer`, `stake`, `add_key`, `delete_key`, `delete_account`, `delegate`, `deploy_global_contract`, `use_global_contract`. |
+
+**Behavior:**
+- Applies to `near:` chains, plus the 32-byte guard on `solana:` and `ton:` described below; every other chain passes through.
+- `sign_transaction` (and `signAndSend`): every listed limit must hold. A transaction the signer could not decode is denied.
+- Omitting `actions` still restricts: keys, contract code, staking and account deletion must be listed explicitly. An empty list (`"receivers": []`, `"methods": []`) allows nothing of that kind.
+- `delegate` (relaying a NEP-366 signed delegate action) checks only the outer action type: the inner actions are authorized by the delegate's own signature and run as its sender. Their deposits, however, are prepaid by the relayer (nearcore's `total_deposit`), so they count toward `max_deposit`.
+- `sign_message` is denied when the message is exactly 32 bytes. NEAR transactions are Ed25519 signatures over `sha256(borsh(Transaction))`, so a raw signature over 32 bytes could authorize any transaction and bypass the rule. Messages of any other length pass.
+- On `solana:` and `ton:` chains, `sign_message` and `sign_transaction` are denied when the bytes those chains sign are exactly 32 long (for Solana, the message after the signature slots). Both sign the caller's bytes as raw Ed25519, and a wallet imported from a raw Ed25519 private key uses the same key for them as for NEAR. Other payloads on those chains pass — but OWS signs a TON transaction as the 32-byte cell hash the wallet expects, so in practice a token carrying this rule cannot sign TON transactions; keep NEAR and TON on separate API keys. Pairing this rule with `allowed_chains: ["near:mainnet"]` is still the simplest way to keep a NEAR agent on NEAR.
+- `sign_hash` is denied on those chains as well (defense in depth: OWS only signs raw hashes on secp256k1 chains); `sign_typed_data` and `read_balance` pass through.
+- Unknown fields, an unknown action type or a `max_deposit` that is not a decimal integer fail closed (the policy does not load, or the request is denied).
+- `effects` is not used: it is empty on NEAR (see below).
 
 ## Custom Executable Policies
 
@@ -265,6 +297,26 @@ For executable policies, the engine injects `policy_config` into the JSON payloa
 | `data` | string | no | Reserved for calldata. Not populated by any chain in the reference implementation. |
 
 Only chains whose signer overrides `make_transaction_context` fill `effects`; today that is Cardano. Everywhere else — EVM included — `effects` is empty and `raw_hex` is the whole payload, so a policy that needs parsed transaction fields has to decode `raw_hex` itself.
+
+NEAR decodes the transaction but leaves `effects` empty, because a NEAR transaction's balance change is not determined by its bytes (gas refunds, `delete_account`, contract logic). For `sign_transaction` on a `near:` chain, `chain_extra` is:
+
+```json
+{
+  "kind": "transaction",
+  "signer_id": "alice.near",
+  "public_key": "ed25519:FVen3X669xLzsi6N2V91DoiyzHzg1uAgqiT8jZ9nS96Z",
+  "nonce": "7",
+  "receiver_id": "ft.example.near",
+  "block_hash": "Bp3BbhbyBNoTt3LgewDgCezdiUAWKxiWq18vdj3PVUiS",
+  "actions": [
+    { "type": "function_call", "method_name": "ft_transfer", "args": "eyJyZWNlaXZlcl9pZCI6ImJvYi5uZWFyIiwiYW1vdW50IjoiNDIifQ==", "gas": "30000000000000", "deposit": "1" },
+    { "type": "transfer", "deposit": "10" }
+  ],
+  "total_deposit": "11"
+}
+```
+
+Integers (`nonce`, `gas`, deposits) are decimal strings, `args` is base64, keys and hashes use NEAR's base58 forms, and contract code appears as `code_hash` (base58 SHA-256) plus `code_len`. Each action carries its fields under the snake_case `type` listed for `near_transaction_limits`; a `delegate` action nests the delegate's `sender_id`, `receiver_id`, `actions`, `nonce`, `max_block_height` and `public_key`, plus its `signature`. `total_deposit` follows nearcore's `total_deposit`: `transfer` and `function_call` deposits, including those inside a relayed delegate action, which the relayer prepays. Account IDs are validated with nearcore's rules. Bytes that do not decode as a NEAR transaction — including transactions using actions newer than the near-api-js 7.x set (state init, gas keys, `DelegateV2`) — are refused before the policy pass, so an API token cannot sign them.
 
 > **Earlier versions documented `transaction.to` and `transaction.value`.** Both fields existed on the struct but were never populated by any chain, on any code path, so a policy reading them always saw `null`. They are removed in favour of `effects`; nothing that worked has stopped working.
 

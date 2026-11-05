@@ -590,6 +590,46 @@ describe('@open-wallet-standard/core', () => {
     deleteWallet(wallet.id, vaultDir);
   });
 
+  it('enforces near_transaction_limits through the node binding', () => {
+    // near-api-js 7.3.1 transaction (alice.near -> ft.example.near: storage_deposit,
+    // ft_transfer, transfer(10)) and its signature with the RFC 8032 vector 1 key.
+    const seed = '9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60';
+    const txHex = '0a000000616c6963652e6e65617200d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a07000000000000000f00000066742e6578616d706c652e6e656172a0a1a2a3a4a5a6a7a8a9aaabacadaeafa0a1a2a3a4a5a6a7a8a9aaabacadaeaf03000000020f00000073746f726167655f6465706f7369741b0000007b226163636f756e745f6964223a22616c6963652e6e656172227d00e057eb481b00000000485637193cc34300000000000000020b00000066745f7472616e73666572280000007b2272656365697665725f6964223a22626f622e6e656172222c22616d6f756e74223a223432227d00e057eb481b000001000000000000000000000000000000030a000000000000000000000000000000';
+    const wallet = importWalletPrivateKey('near-limits', seed, undefined, vaultDir, 'near');
+
+    const policy = (id, maxDeposit) => createPolicy(JSON.stringify({
+      id,
+      name: id,
+      version: 1,
+      created_at: '2026-03-22T00:00:00Z',
+      rules: [{
+        type: 'near_transaction_limits',
+        receivers: ['ft.example.near'],
+        methods: ['storage_deposit', 'ft_transfer'],
+        max_deposit: maxDeposit,
+      }],
+      action: 'deny',
+    }), vaultDir);
+    policy('near-limits-ok', '1250000000000000000011');
+    policy('near-limits-low', '1250000000000000000010');
+
+    const ok = createApiKey('near-ok', [wallet.id], ['near-limits-ok'], '', null, vaultDir);
+    const sig = signTransaction(wallet.id, 'near', txHex, ok.token, null, vaultDir);
+    assert.equal(sig.signature, 'c0b4334753921bab761842bea9f215a02926612c5e8b67f81488f3f9e2f9f2b74d91502cbf98cba7095aa682e8a8059f1e5a3170c11798ce71caf50329dc570b');
+
+    const low = createApiKey('near-low', [wallet.id], ['near-limits-low'], '', null, vaultDir);
+    assert.throws(
+      () => signTransaction(wallet.id, 'near', txHex, low.token, null, vaultDir),
+      (err) => err.message.includes('exceeds max_deposit'),
+    );
+
+    revokeApiKey(ok.id, vaultDir);
+    revokeApiKey(low.id, vaultDir);
+    deletePolicy('near-limits-ok', vaultDir);
+    deletePolicy('near-limits-low', vaultDir);
+    deleteWallet(wallet.id, vaultDir);
+  });
+
   it('executable policy gates signing', () => {
     const wallet = createWallet('exe-test', undefined, 12, vaultDir);
 

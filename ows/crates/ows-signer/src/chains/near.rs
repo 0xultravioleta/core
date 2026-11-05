@@ -31,12 +31,93 @@ pub struct NearSigner;
 /// Borsh enum discriminant for ED25519 signatures (and public keys) in NEAR.
 const KEY_TYPE_ED25519: u8 = 0x00;
 
+/// [NEP-413](https://github.com/near/NEPs/blob/master/neps/nep-0413.md) tag,
+/// `2^31 + 413`, Borsh-encoded as a little-endian `u32` in front of the payload.
+///
+/// The tag keeps a signed message from ever being a valid transaction
+/// signature: a `Transaction` starts with the `u32` length of its signer
+/// account ID (at most 64), so no Borsh transaction can begin with these bytes.
+pub const NEP413_TAG: u32 = (1 << 31) + 413;
+
+/// A NEP-413 off-chain message, the Borsh payload
+/// `{ message: String, nonce: [u8; 32], recipient: String, callbackUrl: Option<String> }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Nep413Message {
+    /// The message the user is asked to sign.
+    pub message: String,
+    /// 32 bytes chosen by the recipient so a signature cannot be replayed.
+    pub nonce: [u8; 32],
+    /// Who the message is for (e.g. `alice.near` or `myapp.com`). Must not be empty.
+    pub recipient: String,
+    /// Optional URL the wallet returns to after signing.
+    pub callback_url: Option<String>,
+}
+
+impl Nep413Message {
+    /// The bytes whose SHA-256 is signed: `borsh(u32 NEP413_TAG) || borsh(payload)`.
+    pub fn signing_preimage(&self) -> Result<Vec<u8>, SignerError> {
+        if self.recipient.is_empty() {
+            return Err(SignerError::InvalidMessage(
+                "NEP-413 recipient must not be empty".into(),
+            ));
+        }
+        let mut out = Vec::with_capacity(
+            4 + 4
+                + self.message.len()
+                + 32
+                + 4
+                + self.recipient.len()
+                + 1
+                + self.callback_url.as_ref().map_or(0, |url| 4 + url.len()),
+        );
+        out.extend_from_slice(&NEP413_TAG.to_le_bytes());
+        write_borsh_string(&mut out, &self.message)?;
+        out.extend_from_slice(&self.nonce);
+        write_borsh_string(&mut out, &self.recipient)?;
+        match &self.callback_url {
+            None => out.push(0),
+            Some(url) => {
+                out.push(1);
+                write_borsh_string(&mut out, url)?;
+            }
+        }
+        Ok(out)
+    }
+
+    /// `sha256(signing_preimage)`, the 32 bytes the Ed25519 signature covers.
+    pub fn signing_hash(&self) -> Result<[u8; 32], SignerError> {
+        Ok(Sha256::digest(self.signing_preimage()?).into())
+    }
+}
+
+/// Borsh `String`: `u32` little-endian byte length, then the UTF-8 bytes.
+fn write_borsh_string(out: &mut Vec<u8>, s: &str) -> Result<(), SignerError> {
+    let len = u32::try_from(s.len())
+        .map_err(|_| SignerError::InvalidMessage("string is longer than u32::MAX bytes".into()))?;
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(s.as_bytes());
+    Ok(())
+}
+
 impl NearSigner {
     fn signing_key(private_key: &[u8]) -> Result<SigningKey, SignerError> {
         let key_bytes: [u8; 32] = private_key.try_into().map_err(|_| {
             SignerError::InvalidPrivateKey(format!("expected 32 bytes, got {}", private_key.len()))
         })?;
         Ok(SigningKey::from_bytes(&key_bytes))
+    }
+
+    /// Sign a NEP-413 message: Ed25519 over `sha256(borsh(NEP413_TAG) || borsh(payload))`.
+    ///
+    /// Produces the same signature as `near-api-js`'s `Signer.signNep413Message`
+    /// and NEP-413 wallets (which usually transport it base64-encoded).
+    pub fn sign_nep413_message(
+        &self,
+        private_key: &[u8],
+        message: &Nep413Message,
+    ) -> Result<SignOutput, SignerError> {
+        let hash = message.signing_hash()?;
+        self.sign(private_key, &hash)
     }
 }
 
@@ -76,10 +157,10 @@ impl ChainSigner for NearSigner {
         address: Option<&str>,
     ) -> Result<SignOutput, SignerError> {
         self.verify_sign_message_address(private_key, address)?;
-        // V1: raw ed25519 over message bytes (parity with Solana).
-        // NEP-413 message signing (`tag 2147484061 || borsh(payload)`) is a
-        // structurally distinct flow with required fields (recipient, nonce);
-        // tracked as a follow-up so callers can opt in.
+        // Raw ed25519 over message bytes (parity with Solana). NEP-413
+        // (`tag 2147484061 || borsh(payload)`) needs structured fields
+        // (recipient, nonce), so it is a separate entry point:
+        // `NearSigner::sign_nep413_message`.
         self.sign(private_key, message)
     }
 
@@ -354,6 +435,144 @@ mod tests {
         assert_eq!(&signed[..tx_bytes.len()], tx_bytes.as_slice());
         assert_eq!(signed[tx_bytes.len()], 0x00, "ED25519 enum discriminant");
         assert_eq!(&signed[tx_bytes.len() + 1..], &[0xAB; 64]);
+    }
+
+    // ----- NEP-413 -----
+
+    /// A NEP-413 vector produced by `near-api-js` 7.3.1 (`KeyPairSigner.signNep413Message`)
+    /// with the RFC 8032 vector 1 key.
+    struct Nep413Vector {
+        message: &'static str,
+        nonce_hex: &'static str,
+        recipient: &'static str,
+        callback_url: Option<&'static str>,
+        preimage_hex: &'static str,
+        hash_hex: &'static str,
+        signature_hex: &'static str,
+    }
+
+    const NEP413_VECTORS: &[Nep413Vector] = &[
+        Nep413Vector {
+            message: "Login request",
+            nonce_hex: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            recipient: "example.near",
+            callback_url: None,
+            preimage_hex: "9d0100800d0000004c6f67696e2072657175657374000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0c0000006578616d706c652e6e65617200",
+            hash_hex: "42489eb3ff8180ce947da4a8fc2199a4c3e1a3aeecae967ecdf1db2565ad463f",
+            signature_hex: "2320b020f1863ff45a5117fa91ce190e3edab6d000d52d7980822bdf5756457390732bae65729ab62ef33c098407609801fb1cfd5d450a17313bc4885b1c370f",
+        },
+        Nep413Vector {
+            message: "Sign in to example.com",
+            nonce_hex: "4242424242424242424242424242424242424242424242424242424242424242",
+            recipient: "example.com",
+            callback_url: Some("https://example.com/callback"),
+            preimage_hex: "9d010080160000005369676e20696e20746f206578616d706c652e636f6d42424242424242424242424242424242424242424242424242424242424242420b0000006578616d706c652e636f6d011c00000068747470733a2f2f6578616d706c652e636f6d2f63616c6c6261636b",
+            hash_hex: "73f940eb786541d16f6ddad2977cc10ab9fddee98bcb1f8255dbe5e873b681cb",
+            signature_hex: "c76b8fd211f7545b9d3fb863ad38d9bb7fdb31521eea65e13efcf67a48ccbaef0e54c64ae2dd4fd6b8f28dba6463468487ec846e3b1e252588dfbedf0a86a709",
+        },
+        // Multi-byte UTF-8 message and an empty (but present) callback URL.
+        Nep413Vector {
+            message: "h\u{e9}llo \u{2713} \u{4e16}\u{754c}",
+            nonce_hex: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            recipient: "app.example.near",
+            callback_url: Some(""),
+            preimage_hex: "9d0100801100000068c3a96c6c6f20e29c9320e4b896e7958cffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff100000006170702e6578616d706c652e6e6561720100000000",
+            hash_hex: "02709f711f9702f740233322954d854e33c2ed04e52a18d9898f9f54b1d113fa",
+            signature_hex: "77b14a2e6dd8543aee54d6f5f6188f2c6c0b7fe0b6a2999c0b02a6c47c4fc1140c48c6910ec65e2350dc9fd0fb543228f9f3472683e30c5eaaf465254acf240c",
+        },
+        Nep413Vector {
+            message: "",
+            nonce_hex: "0000000000000000000000000000000000000000000000000000000000000000",
+            recipient: "verifier.near",
+            callback_url: None,
+            preimage_hex: "9d0100800000000000000000000000000000000000000000000000000000000000000000000000000d00000076657269666965722e6e65617200",
+            hash_hex: "1003082300749f958b1aa80e496a32b3ce6b4377b52e6ed5782a686aeb59a69a",
+            signature_hex: "feda994ffe3a2d87dbffa707a6ec36001a35b0da521470b2560865bf8b2e70dd5262bfcb3505da5ba3212fed34c735ef870f67295d29176eaf48ab2f382f7c02",
+        },
+    ];
+
+    fn nep413_message(v: &Nep413Vector) -> Nep413Message {
+        Nep413Message {
+            message: v.message.to_string(),
+            nonce: hex::decode(v.nonce_hex).unwrap().try_into().unwrap(),
+            recipient: v.recipient.to_string(),
+            callback_url: v.callback_url.map(String::from),
+        }
+    }
+
+    #[test]
+    fn test_nep413_tag_value() {
+        assert_eq!(NEP413_TAG, 2_147_484_061);
+        assert_eq!(NEP413_TAG.to_le_bytes(), [0x9d, 0x01, 0x00, 0x80]);
+    }
+
+    #[test]
+    fn test_nep413_matches_near_api_js_vectors() {
+        let signer = NearSigner;
+        let verifying_key = SigningKey::from_bytes(&rfc_seed().try_into().unwrap()).verifying_key();
+        for v in NEP413_VECTORS {
+            let msg = nep413_message(v);
+            assert_eq!(
+                hex::encode(msg.signing_preimage().unwrap()),
+                v.preimage_hex,
+                "preimage for {:?}",
+                v.message
+            );
+            assert_eq!(hex::encode(msg.signing_hash().unwrap()), v.hash_hex);
+
+            let out = signer.sign_nep413_message(&rfc_seed(), &msg).unwrap();
+            assert_eq!(hex::encode(&out.signature), v.signature_hex);
+            assert_eq!(
+                out.public_key.as_deref(),
+                Some(verifying_key.as_bytes().as_slice())
+            );
+            let sig = ed25519_dalek::Signature::from_bytes(&out.signature.try_into().unwrap());
+            verifying_key
+                .verify(&msg.signing_hash().unwrap(), &sig)
+                .expect("NEP-413 signature must verify against the payload hash");
+        }
+    }
+
+    #[test]
+    fn test_nep413_differs_from_raw_sign_message() {
+        // The NEP-413 signature covers the tagged hash, never the raw message bytes.
+        let signer = NearSigner;
+        let msg = nep413_message(&NEP413_VECTORS[0]);
+        let nep413 = signer.sign_nep413_message(&rfc_seed(), &msg).unwrap();
+        let raw = signer
+            .sign_message(&rfc_seed(), msg.message.as_bytes(), None)
+            .unwrap();
+        assert_ne!(nep413.signature, raw.signature);
+    }
+
+    #[test]
+    fn test_nep413_rejects_empty_recipient() {
+        let signer = NearSigner;
+        let mut msg = nep413_message(&NEP413_VECTORS[0]);
+        msg.recipient = String::new();
+        assert!(matches!(
+            msg.signing_preimage(),
+            Err(SignerError::InvalidMessage(_))
+        ));
+        assert!(signer.sign_nep413_message(&rfc_seed(), &msg).is_err());
+    }
+
+    #[test]
+    fn test_nep413_none_and_empty_callback_url_differ() {
+        // `None` is Borsh `0x00`; `Some("")` is `0x01 || u32 0`. They must not collide.
+        let mut msg = nep413_message(&NEP413_VECTORS[0]);
+        let none = msg.signing_preimage().unwrap();
+        msg.callback_url = Some(String::new());
+        let empty = msg.signing_preimage().unwrap();
+        assert_eq!(none.last(), Some(&0x00));
+        assert_eq!(&empty[empty.len() - 5..], &[0x01, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_nep413_rejects_invalid_key() {
+        let signer = NearSigner;
+        let msg = nep413_message(&NEP413_VECTORS[0]);
+        assert!(signer.sign_nep413_message(&[0u8; 31], &msg).is_err());
     }
 
     #[test]

@@ -56,6 +56,7 @@ The following features are optional unless a calling profile requires them:
 - `signHash`
 - `signAuthorization`
 - `signTypedData`
+- `signDelegateAction`
 - executable policies
 - subprocess or enclave-style isolation
 - shorthand aliases in interactive CLI contexts

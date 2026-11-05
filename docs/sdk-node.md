@@ -355,6 +355,17 @@ console.log(result.signature);
 
 **Returns:** `SignResult`
 
+#### `signDelegateAction(wallet, chain, delegateActionHex, passphrase?, index?, vaultPath?)`
+
+Sign a NEAR [NEP-366](https://github.com/near/NEPs/blob/master/neps/nep-0366.md) delegate action (meta-transaction): Ed25519 over `sha256(borsh(u32 2^30 + 366) || borsh(DelegateAction))`, the same signature `near-api-js`'s `signDelegateAction` produces.
+
+`chain` must resolve to a NEAR chain. `delegateActionHex` is `borsh(DelegateAction)` without the prefix; it must decode and name this wallet's key as its `public_key`. The relayer submits `delegateActionHex + "00" + signature` as the `SignedDelegateAction`. With an API token, `near_transaction_limits` applies to the delegate's receiver, actions and deposits.
+
+```javascript
+const { signature } = signDelegateAction("agent-treasury", "near", delegateActionHex);
+const signedDelegateHex = delegateActionHex + "00" + signature;
+```
+
 #### `signAndSend(wallet, chain, txHex, passphrase?, index?, rpcUrl?, vaultPath?)`
 
 Sign and broadcast a transaction. If `rpcUrl` is omitted, OWS resolves it from explicit config overrides or built-in defaults.

@@ -250,6 +250,32 @@ impl Transaction {
 }
 
 impl DelegateAction {
+    /// Decode `borsh(DelegateAction)`, without the NEP-366 prefix. The whole
+    /// input must be consumed, and a nested delegate action is rejected.
+    pub fn from_borsh(bytes: &[u8]) -> Result<Self, SignerError> {
+        let mut r = Reader::new(bytes);
+        let delegate_action = r.delegate_action()?;
+        r.finish()?;
+        Ok(delegate_action)
+    }
+
+    /// Sum of the deposits the delegate's actions attach, in yoctoNEAR. nearcore
+    /// has the relayer that submits the delegate prepay them (refunded to
+    /// `sender_id` if the actions fail).
+    pub fn total_deposit(&self) -> Result<u128, SignerError> {
+        total_deposit(&self.actions)
+    }
+
+    /// The policy-facing JSON (`TransactionContext::chain_extra`) for a
+    /// delegate action being signed: its fields plus `kind: "delegate_action"`
+    /// and `total_deposit`.
+    pub fn to_json(&self) -> Result<Value, SignerError> {
+        let mut json = self.fields_json();
+        json["kind"] = json!("delegate_action");
+        json["total_deposit"] = json!(self.total_deposit()?.to_string());
+        Ok(json)
+    }
+
     /// The delegate's fields as JSON, without a `kind` tag.
     fn fields_json(&self) -> Value {
         json!({
@@ -604,7 +630,7 @@ impl<'a> Reader<'a> {
             Ok(())
         } else {
             Err(malformed(format!(
-                "{} trailing bytes after the transaction",
+                "{} trailing bytes after the value",
                 self.buf.len() - self.pos
             )))
         }
@@ -1025,5 +1051,149 @@ mod tests {
             bs58::decode(&key["ml-dsa-65:".len()..]).into_vec().unwrap(),
             vec![0x5a; 1952]
         );
+    }
+
+    // ----- NEP-366 delegate actions -----
+
+    /// near-api-js 7.3.1 `buildDelegateAction` + `KeyPairSigner.signDelegateAction`
+    /// with the RFC 8032 vector 1 key. `expected` is derived from near-api-js's own
+    /// `deserialize(SCHEMA.DelegateAction, ...)`.
+    struct DelegateVector {
+        delegate_action_hex: &'static str,
+        hash_hex: &'static str,
+        signature_hex: &'static str,
+        expected: &'static str,
+    }
+
+    const DELEGATE_VECTORS: &[DelegateVector] = &[
+        // implicit account -> ft.example.near: ft_transfer with 1 yoctoNEAR.
+        DelegateVector {
+            delegate_action_hex: "400000006437356139383031383262313061623764353462666564336339363430373361306565313732663364616136\
+         32333235616630323161363866373037353131610f00000066742e6578616d706c652e6e65617201000000020b000000\
+         66745f7472616e736665723a0000007b2272656365697665725f6964223a226d65726368616e742e6578616d706c652e\
+         6e656172222c22616d6f756e74223a2231303030303030227d00e057eb481b0000010000000000000000000000000000\
+         002a0000000000000000e1f5050000000000d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707\
+         511a",
+            hash_hex: "cb7d799ec8512d99f74a285153a8e5041ed7bb36975d144359ba9fb88c6d2345",
+            signature_hex: "b01b4df30474223b0892e3bc1fe7b8fb9362b8783e89017be2e9a4bbc88d9c9054e6f33067c97fc2de71602b54844990cc72c382a23b1a5e0a1390b9b72c4200",
+            expected: r#"{"sender_id":"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a","receiver_id":"ft.example.near","actions":[{"type":"function_call","method_name":"ft_transfer","args":"eyJyZWNlaXZlcl9pZCI6Im1lcmNoYW50LmV4YW1wbGUubmVhciIsImFtb3VudCI6IjEwMDAwMDAifQ==","gas":"30000000000000","deposit":"1"}],"nonce":"42","max_block_height":"100000000","public_key":"ed25519:FVen3X669xLzsi6N2V91DoiyzHzg1uAgqiT8jZ9nS96Z","kind":"delegate_action","total_deposit":"1"}"#,
+        },
+        // agent.example.near -> escrow.example.near: transfer(1 NEAR),
+        // ft_transfer_call and a function-call access key; u64::MAX nonce.
+        DelegateVector {
+            delegate_action_hex: "120000006167656e742e6578616d706c652e6e65617213000000657363726f772e6578616d706c652e6e656172030000\
+         0003000000a1edccce1bc2d3000000000000021000000066745f7472616e736665725f63616c6c3b0000007b22726563\
+         65697665725f6964223a22657363726f772e6578616d706c652e6e656172222c22616d6f756e74223a2235222c226d73\
+         67223a22227d00203d88792d000001000000000000000000000000000000050007070707070707070707070707070707\
+         0707070707070707070707070707070700000000000000000001000040683bb3f386f034000000000000130000006573\
+         63726f772e6578616d706c652e6e6561720200000005000000636c61696d06000000726566756e64ffffffffffffffff\
+         010000000000000000d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+            hash_hex: "dff5ebbff1264f9ad4b20656e2cbb1053c0bcc6b0736cc54fa4ccf72e21a9df2",
+            signature_hex: "aa2272bbd8b8169ddeccf62735c11f69e87c66d14ad30702c9cf4692c793a2cb29fe8e9d8557847ccc2296eb1ce5827e67162b0eba997ceefb62fd53c0025f0b",
+            expected: r#"{"sender_id":"agent.example.near","receiver_id":"escrow.example.near","actions":[{"type":"transfer","deposit":"1000000000000000000000000"},{"type":"function_call","method_name":"ft_transfer_call","args":"eyJyZWNlaXZlcl9pZCI6ImVzY3Jvdy5leGFtcGxlLm5lYXIiLCJhbW91bnQiOiI1IiwibXNnIjoiIn0=","gas":"50000000000000","deposit":"1"},{"type":"add_key","public_key":"ed25519:US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx","access_key":{"nonce":"0","permission":{"type":"function_call","allowance":"250000000000000000000000","receiver_id":"escrow.example.near","method_names":["claim","refund"]}}}],"nonce":"18446744073709551615","max_block_height":"1","public_key":"ed25519:FVen3X669xLzsi6N2V91DoiyzHzg1uAgqiT8jZ9nS96Z","kind":"delegate_action","total_deposit":"1000000000000000000000001"}"#,
+        },
+    ];
+
+    fn rfc_seed() -> Vec<u8> {
+        hex::decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60").unwrap()
+    }
+
+    #[test]
+    fn nep366_prefix_value() {
+        assert_eq!(crate::chains::near::NEP366_PREFIX, 1_073_742_190);
+        assert_eq!(
+            crate::chains::near::NEP366_PREFIX.to_le_bytes(),
+            [0x6e, 0x01, 0x00, 0x40]
+        );
+    }
+
+    #[test]
+    fn delegate_actions_match_near_api_js() {
+        use crate::chains::near::{delegate_action_hash, NearSigner};
+        for v in DELEGATE_VECTORS {
+            let bytes = hex::decode(v.delegate_action_hex).unwrap();
+            let decoded = DelegateAction::from_borsh(&bytes).unwrap();
+            let expected: Value = serde_json::from_str(v.expected).unwrap();
+            assert_eq!(decoded.to_json().unwrap(), expected);
+
+            assert_eq!(hex::encode(delegate_action_hash(&bytes)), v.hash_hex);
+            let out = NearSigner
+                .sign_delegate_action(&rfc_seed(), &bytes)
+                .unwrap();
+            assert_eq!(hex::encode(&out.signature), v.signature_hex);
+        }
+    }
+
+    #[test]
+    fn sign_delegate_action_requires_the_signing_key() {
+        use crate::chains::near::NearSigner;
+        let bytes = hex::decode(DELEGATE_VECTORS[0].delegate_action_hex).unwrap();
+        // Any other key: the delegate names the RFC 8032 key, so it could never be relayed.
+        let err = NearSigner
+            .sign_delegate_action(&[0x01; 32], &bytes)
+            .unwrap_err();
+        assert!(
+            matches!(&err, SignerError::InvalidTransaction(m) if m.contains("is not the signing key")),
+            "{err}"
+        );
+        // A secp256k1 public_key in the delegate never matches an Ed25519 key.
+        let mut secp = bytes[..bytes.len() - 33].to_vec();
+        secp.push(1);
+        secp.extend_from_slice(&[0x02; 64]);
+        assert!(DelegateAction::from_borsh(&secp).is_ok());
+        assert!(NearSigner.sign_delegate_action(&rfc_seed(), &secp).is_err());
+        // Invalid key length.
+        assert!(NearSigner
+            .sign_delegate_action(&[0x01; 31], &bytes)
+            .is_err());
+    }
+
+    #[test]
+    fn sign_delegate_action_rejects_malformed_input() {
+        use crate::chains::near::NearSigner;
+        let bytes = hex::decode(DELEGATE_VECTORS[0].delegate_action_hex).unwrap();
+        // Already prefixed: the prefix is added by the signer, not the caller.
+        let mut prefixed = crate::chains::near::NEP366_PREFIX.to_le_bytes().to_vec();
+        prefixed.extend_from_slice(&bytes);
+        assert!(NearSigner
+            .sign_delegate_action(&rfc_seed(), &prefixed)
+            .is_err());
+        // Trailing bytes and truncation.
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(DelegateAction::from_borsh(&trailing).is_err());
+        assert!(DelegateAction::from_borsh(&bytes[..bytes.len() - 1]).is_err());
+        assert!(DelegateAction::from_borsh(&[]).is_err());
+        // A transaction is not a delegate action.
+        let tx = hex::decode(TX_TRANSFER_AND_CALL).unwrap();
+        assert!(NearSigner.sign_delegate_action(&rfc_seed(), &tx).is_err());
+    }
+
+    #[test]
+    fn delegate_action_rejects_nested_delegate() {
+        // `delegate(..)` minus its action tag is a SignedDelegateAction; strip the
+        // signature to get a DelegateAction whose single action is a delegate.
+        let mut inner = delegate(&[delegate(&[transfer(1)])]);
+        inner.remove(0);
+        inner.truncate(inner.len() - 65);
+        let err = DelegateAction::from_borsh(&inner).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot contain another delegate"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn delegate_action_json_counts_its_own_deposits() {
+        let mut da = delegate(&[transfer(7), transfer(5)]);
+        da.remove(0);
+        da.truncate(da.len() - 65);
+        let decoded = DelegateAction::from_borsh(&da).unwrap();
+        assert_eq!(decoded.total_deposit().unwrap(), 12);
+        let json = decoded.to_json().unwrap();
+        assert_eq!(json["kind"], "delegate_action");
+        assert_eq!(json["total_deposit"], "12");
+        assert_eq!(json["sender_id"], "alice.near");
+        assert_eq!(json["receiver_id"], "bob.near");
     }
 }

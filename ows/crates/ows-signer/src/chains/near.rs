@@ -157,6 +157,49 @@ impl ChainSigner for NearSigner {
     }
 }
 
+/// [NEP-366](https://github.com/near/NEPs/blob/master/neps/nep-0366.md) prefix,
+/// `2^30 + 366`, Borsh-encoded as a little-endian `u32` in front of a
+/// `DelegateAction` before hashing. It keeps a delegate-action signature from
+/// ever being a valid transaction signature (a `Transaction` starts with the
+/// `u32` length of its signer account ID, at most 64).
+pub const NEP366_PREFIX: u32 = (1 << 30) + 366;
+
+/// `sha256(borsh(u32 NEP366_PREFIX) || delegate_action)`, the 32 bytes a
+/// NEP-366 signature covers. `delegate_action` is `borsh(DelegateAction)`.
+pub fn delegate_action_hash(delegate_action: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(NEP366_PREFIX.to_le_bytes());
+    hasher.update(delegate_action);
+    hasher.finalize().into()
+}
+
+impl NearSigner {
+    /// Sign a NEP-366 delegate action (meta-transaction): Ed25519 over
+    /// `sha256(borsh(u32 2^30 + 366) || borsh(DelegateAction))`, the signature
+    /// near-api-js `Signer.signDelegateAction` produces.
+    ///
+    /// `delegate_action` is `borsh(DelegateAction)` without the prefix. It must
+    /// decode, and its `public_key` must be this signing key: nearcore checks
+    /// the signature against that key, so any other key's delegate could never
+    /// be relayed. The signed delegate action a relayer submits is
+    /// `delegate_action || 0x00 || signature` (`borsh(SignedDelegateAction)`).
+    pub fn sign_delegate_action(
+        &self,
+        private_key: &[u8],
+        delegate_action: &[u8],
+    ) -> Result<SignOutput, SignerError> {
+        let decoded = decode::DelegateAction::from_borsh(delegate_action)?;
+        let public_key = Self::signing_key(private_key)?.verifying_key().to_bytes();
+        if decoded.public_key != decode::PublicKey::Ed25519(public_key) {
+            return Err(SignerError::InvalidTransaction(format!(
+                "delegate action public_key {} is not the signing key",
+                decoded.public_key
+            )));
+        }
+        self.sign(private_key, &delegate_action_hash(delegate_action))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

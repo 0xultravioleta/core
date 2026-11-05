@@ -275,6 +275,33 @@ pub fn sign_typed_data(
     .map_err(map_err)
 }
 
+/// Sign a NEAR NEP-366 delegate action (meta-transaction). Returns hex-encoded signature.
+///
+/// `delegate_action_hex` is `borsh(DelegateAction)` without the NEP-366 prefix.
+#[napi]
+pub fn sign_delegate_action(
+    wallet: String,
+    chain: String,
+    delegate_action_hex: String,
+    passphrase: Option<String>,
+    index: Option<u32>,
+    vault_path_opt: Option<String>,
+) -> Result<SignResult> {
+    ows_lib::sign_delegate_action(
+        &wallet,
+        &chain,
+        &delegate_action_hex,
+        passphrase.as_deref(),
+        index,
+        vault_path(vault_path_opt).as_deref(),
+    )
+    .map(|r| SignResult {
+        signature: r.signature,
+        recovery_id: r.recovery_id.map(|v| v as u32),
+    })
+    .map_err(map_err)
+}
+
 /// Sign a raw 32-byte hash on a secp256k1-backed chain. Returns hex-encoded signature.
 #[napi]
 pub fn sign_hash(

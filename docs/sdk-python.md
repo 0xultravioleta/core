@@ -290,6 +290,17 @@ result = sign_transaction("agent-treasury", "evm", "02f8...")
 print(result["signature"])
 ```
 
+#### `sign_delegate_action(wallet, chain, delegate_action_hex, passphrase=None, index=None, vault_path=None)`
+
+Sign a NEAR [NEP-366](https://github.com/near/NEPs/blob/master/neps/nep-0366.md) delegate action (meta-transaction): Ed25519 over `sha256(borsh(u32 2^30 + 366) || borsh(DelegateAction))`, the same signature `near-api-js`'s `signDelegateAction` produces.
+
+`chain` must resolve to a NEAR chain. `delegate_action_hex` is `borsh(DelegateAction)` without the prefix; it must decode and name this wallet's key as its `public_key`. The relayer submits `delegate_action_hex + "00" + signature` as the `SignedDelegateAction`. With an API token, `near_transaction_limits` applies to the delegate's receiver, actions and deposits.
+
+```python
+result = sign_delegate_action("agent-treasury", "near", delegate_action_hex)
+signed_delegate_hex = delegate_action_hex + "00" + result["signature"]
+```
+
 #### `sign_and_send(wallet, chain, tx_hex, passphrase=None, index=None, rpc_url=None, vault_path=None)`
 
 Sign and broadcast a transaction.

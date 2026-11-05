@@ -772,6 +772,62 @@ pub fn sign_typed_data(
     })
 }
 
+/// Sign a NEAR [NEP-366](https://github.com/near/NEPs/blob/master/neps/nep-0366.md)
+/// delegate action (meta-transaction). Returns the hex-encoded Ed25519
+/// signature over `sha256(borsh(2^30 + 366) || borsh(DelegateAction))`.
+///
+/// `delegate_action_hex` is `borsh(DelegateAction)` without the prefix,
+/// hex-encoded (`0x` optional). It must decode and name this wallet's key as
+/// its `public_key`. The relayer submits `delegate_action || 0x00 || signature`.
+///
+/// The `passphrase` parameter accepts either the owner's passphrase or an
+/// API token (`ows_key_...`). With a token, policies see a `sign_transaction`
+/// request with the decoded delegate action in `chain_extra`
+/// (`kind: "delegate_action"`).
+pub fn sign_delegate_action(
+    wallet: &str,
+    chain: &str,
+    delegate_action_hex: &str,
+    passphrase: Option<&str>,
+    index: Option<u32>,
+    vault_path: Option<&Path>,
+) -> Result<SignResult, OwsLibError> {
+    let credential = passphrase.unwrap_or("");
+    let chain = parse_chain(chain)?;
+    if chain.chain_type != ChainType::Near {
+        return Err(OwsLibError::InvalidInput(
+            "NEP-366 delegate action signing is only supported for NEAR chains".into(),
+        ));
+    }
+    let hex_clean = delegate_action_hex
+        .strip_prefix("0x")
+        .unwrap_or(delegate_action_hex);
+    let delegate_action = hex::decode(hex_clean)
+        .map_err(|e| OwsLibError::InvalidInput(format!("invalid hex delegate action: {e}")))?;
+    // Validates the structure before any key is decrypted.
+    ows_signer::chains::near::decode::DelegateAction::from_borsh(&delegate_action)?;
+
+    if credential.starts_with(crate::key_store::TOKEN_PREFIX) {
+        return crate::key_ops::sign_delegate_action_with_api_key(
+            credential,
+            wallet,
+            &chain,
+            &delegate_action,
+            index,
+            vault_path,
+        );
+    }
+
+    let key = decrypt_signing_key(wallet, chain.chain_type, credential, index, vault_path)?;
+    let output =
+        ows_signer::chains::NearSigner.sign_delegate_action(key.expose(), &delegate_action)?;
+
+    Ok(SignResult {
+        signature: hex::encode(&output.signature),
+        recovery_id: output.recovery_id,
+    })
+}
+
 /// Sign and broadcast a transaction. Returns the transaction hash.
 ///
 /// The `passphrase` parameter accepts either the owner's passphrase or an

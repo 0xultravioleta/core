@@ -36,6 +36,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   deposits a relayed delegate action makes the relayer prepay), for `near:` chains. It also
   refuses 32-byte raw Ed25519 payloads on NEAR, Solana and TON, which could otherwise carry a
   NEAR transaction signature past it (an imported Ed25519 key is shared across those chains)
+- NEAR NEP-366 delegate actions: `sign_delegate_action` (`signDelegateAction` in Node) signs
+  `sha256(borsh(2^30 + 366) || borsh(DelegateAction))`, byte-for-byte what `near-api-js`
+  produces. The delegate action must decode and name the wallet's key; in agent mode policies
+  see it as a `sign_transaction` request (`chain_extra.kind: "delegate_action"`) and
+  `near_transaction_limits` applies to it
 
 ### Breaking
 
@@ -59,6 +64,10 @@ Policy contract, as executable policies see it on stdin:
 - On NEAR, an API token only signs bytes that decode as a Borsh `Transaction`
   (`sign_transaction` / `sign_and_send` decode before the policy pass); the owner passphrase
   path still signs any bytes.
+- On NEAR, a `sign_transaction` request can also carry a NEP-366 `DelegateAction`
+  (`sign_delegate_action`): `raw_hex` is then the delegate action and `chain_extra.kind` is
+  `"delegate_action"`. An executable policy that decodes `raw_hex` itself must branch on
+  `chain_extra.kind`.
 
 Rust API:
 

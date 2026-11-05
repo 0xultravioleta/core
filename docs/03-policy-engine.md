@@ -181,6 +181,7 @@ Restricts what an API key can sign on NEAR (`near:*` chains). The rule reads the
 **Behavior:**
 - Applies to `near:` chains, plus the 32-byte guard on `solana:` and `ton:` described below; every other chain passes through.
 - `sign_transaction` (and `signAndSend`): every listed limit must hold. A transaction the signer could not decode is denied.
+- `signDelegateAction` (NEP-366): the delegate action being signed is checked the same way — its `receiver_id`, its actions and its deposits.
 - Omitting `actions` still restricts: keys, contract code, staking and account deletion must be listed explicitly. An empty list (`"receivers": []`, `"methods": []`) allows nothing of that kind.
 - `delegate` (relaying a NEP-366 signed delegate action) checks only the outer action type: the inner actions are authorized by the delegate's own signature and run as its sender. Their deposits, however, are prepaid by the relayer (nearcore's `total_deposit`), so they count toward `max_deposit`.
 - `sign_message` is denied when the message is exactly 32 bytes. NEAR transactions are Ed25519 signatures over `sha256(borsh(Transaction))`, so a raw signature over 32 bytes could authorize any transaction and bypass the rule. Messages of any other length pass.
@@ -317,6 +318,8 @@ NEAR decodes the transaction but leaves `effects` empty, because a NEAR transact
 ```
 
 Integers (`nonce`, `gas`, deposits) are decimal strings, `args` is base64, keys and hashes use NEAR's base58 forms, and contract code appears as `code_hash` (base58 SHA-256) plus `code_len`. Each action carries its fields under the snake_case `type` listed for `near_transaction_limits`; a `delegate` action nests the delegate's `sender_id`, `receiver_id`, `actions`, `nonce`, `max_block_height` and `public_key`, plus its `signature`. `total_deposit` follows nearcore's `total_deposit`: `transfer` and `function_call` deposits, including those inside a relayed delegate action, which the relayer prepays. Account IDs are validated with nearcore's rules. Bytes that do not decode as a NEAR transaction — including transactions using actions newer than the near-api-js 7.x set (state init, gas keys, `DelegateV2`) — are refused before the policy pass, so an API token cannot sign them.
+
+`signDelegateAction` is presented as `sign_transaction` too, with `raw_hex` set to the `DelegateAction` Borsh and `chain_extra` carrying `kind: "delegate_action"`, `sender_id`, `receiver_id`, `actions`, `nonce`, `max_block_height`, `public_key` and `total_deposit` (the deposits the delegate's actions attach, which the relayer that submits it prepays). An executable policy that decodes `transaction.raw_hex` itself must branch on `chain_extra.kind` first: on NEAR, a `sign_transaction` request can carry a `Transaction` or a `DelegateAction`.
 
 > **Earlier versions documented `transaction.to` and `transaction.value`.** Both fields existed on the struct but were never populated by any chain, on any code path, so a policy reading them always saw `null`. They are removed in favour of `effects`; nothing that worked has stopped working.
 

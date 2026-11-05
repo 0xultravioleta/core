@@ -116,6 +116,20 @@ The `typedDataJson` field must be a JSON string containing the standard EIP-712 
 
 Returns a `SignMessageResult` with the signature and recovery ID. Only supported for EVM chains.
 
+### `signDelegateAction(request: SignDelegateActionRequest): Promise<SignMessageResult>`
+
+Signs a NEAR [NEP-366](https://github.com/near/NEPs/blob/master/neps/nep-0366.md) delegate action (meta-transaction), which a relayer wraps in its own transaction and pays gas for.
+
+```typescript
+interface SignDelegateActionRequest {
+  walletId: WalletId;
+  chainId: ChainId;                     // Must resolve to a NEAR chain
+  delegateActionHex: string;            // borsh(DelegateAction), without the NEP-366 prefix
+}
+```
+
+This operation signs `sha256(borsh(u32 2^30 + 366) || borsh(DelegateAction))` with Ed25519, the same signature `near-api-js`'s `signDelegateAction` produces; the prefix guarantees the signature can never authorize a transaction directly. The bytes MUST decode as a `DelegateAction` (a nested delegate action is rejected) whose `public_key` is the wallet's key, since no relayer could submit a delegate signed by any other key. The `SignedDelegateAction` a relayer submits is `delegateActionHex || 00 || signature`. With an API token, policies see a `sign_transaction` request: `transaction.raw_hex` is the delegate action and `transaction.chain_extra` its decoded fields with `kind: "delegate_action"`, so `near_transaction_limits` applies to it as to a transaction.
+
 ### `signHash(request: SignHashRequest): Promise<SignMessageResult>`
 
 Signs a raw 32-byte hash without applying any prefix, domain separator, or other transformation.

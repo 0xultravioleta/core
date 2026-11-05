@@ -285,6 +285,56 @@ pub fn sign_typed_data_with_api_key(
     })
 }
 
+/// Sign a NEAR NEP-366 delegate action using an API token (agent mode).
+///
+/// A signed delegate action authorizes its actions exactly as a transaction
+/// would, so policies see a `sign_transaction` request: `raw_hex` is
+/// `borsh(DelegateAction)` (without the NEP-366 prefix) and `chain_extra` the
+/// decoded fields with `kind: "delegate_action"`. `near_transaction_limits`
+/// applies to it like to a transaction.
+pub fn sign_delegate_action_with_api_key(
+    token: &str,
+    wallet_name_or_id: &str,
+    chain: &ows_core::Chain,
+    delegate_action: &[u8],
+    index: Option<u32>,
+    vault_path: Option<&Path>,
+) -> Result<crate::types::SignResult, OwsLibError> {
+    if chain.chain_type != ows_core::ChainType::Near {
+        return Err(OwsLibError::InvalidInput(
+            "NEP-366 delegate action signing is only supported for NEAR chains".into(),
+        ));
+    }
+    let decoded = ows_signer::chains::near::decode::DelegateAction::from_borsh(delegate_action)?;
+
+    let (key_file, wallet) = load_authorized_wallet(token, wallet_name_or_id, vault_path)?;
+    let transaction = ows_core::policy::TransactionContext {
+        effects: vec![],
+        raw_hex: hex::encode(delegate_action),
+        data: None,
+        chain_extra: Some(decoded.to_json()?),
+    };
+    let (key, _) = enforce_policies_and_decrypt_key(
+        token,
+        key_file,
+        wallet,
+        chain,
+        PolicyRequestType::SignTransaction,
+        Some(transaction),
+        None,
+        index,
+        vault_path,
+    )?;
+
+    let output =
+        ows_signer::chains::NearSigner.sign_delegate_action(key.expose(), delegate_action)?;
+
+    Ok(crate::types::SignResult {
+        signature: hex::encode(&output.signature),
+        recovery_id: output.recovery_id,
+    })
+}
+
 /// Token → key file lookup, expiry check, wallet load + scope check.
 /// Shared by every API-key-authorized flow.
 pub fn load_authorized_wallet(
@@ -1594,5 +1644,228 @@ else:
             }
             other => panic!("expected PolicyDenied, got: {other}"),
         }
+    }
+
+    // ================================================================
+    // NEAR NEP-366 delegate actions
+    // ================================================================
+
+    /// near-api-js 7.3.1 `buildDelegateAction`: the RFC 8032 key's implicit account
+    /// -> `ft.example.near`, one ft_transfer with 1 yoctoNEAR, nonce 42.
+    const NEAR_DELEGATE: &str = "40000000643735613938303138326231306162376435346266656433633936343037336130656531373266336461613632\
+        333235616630323161363866373037353131610f00000066742e6578616d706c652e6e65617201000000020b00000066\
+        745f7472616e736665723a0000007b2272656365697665725f6964223a226d65726368616e742e6578616d706c652e6e\
+        656172222c22616d6f756e74223a2231303030303030227d00e057eb481b0000010000000000000000000000000000002a\
+        0000000000000000e1f5050000000000d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+    /// near-api-js 7.3.1 `KeyPairSigner.signDelegateAction(NEAR_DELEGATE)`.
+    const NEAR_DELEGATE_SIGNATURE: &str = "b01b4df30474223b0892e3bc1fe7b8fb9362b8783e89017be2e9a4bbc88d9c9054e6f33067c97fc2de71602b54844990cc72c382a23b1a5e0a1390b9b72c4200";
+
+    fn delegate_limits(receiver: &str, max_deposit: &str) -> ows_core::PolicyRule {
+        ows_core::PolicyRule::NearTransactionLimits(ows_core::NearTransactionLimits {
+            receivers: Some(vec![receiver.into()]),
+            methods: Some(vec!["ft_transfer".into()]),
+            max_deposit: Some(max_deposit.into()),
+            actions: None,
+        })
+    }
+
+    #[test]
+    fn sign_delegate_action_owner_path_matches_near_api_js() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+        let (wallet_id, _) = near_agent(vault, vec![]);
+        for hex_input in [NEAR_DELEGATE.to_string(), format!("0x{NEAR_DELEGATE}")] {
+            let signed = crate::ops::sign_delegate_action(
+                &wallet_id,
+                "near",
+                &hex_input,
+                Some(""),
+                None,
+                Some(vault),
+            )
+            .unwrap();
+            assert_eq!(signed.signature, NEAR_DELEGATE_SIGNATURE);
+            assert_eq!(signed.recovery_id, None);
+        }
+    }
+
+    #[test]
+    fn near_transaction_limits_gate_agent_delegate_actions() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wallet_id, token) =
+            near_agent(dir.path(), vec![delegate_limits("ft.example.near", "1")]);
+        let signed = crate::ops::sign_delegate_action(
+            &wallet_id,
+            "near",
+            NEAR_DELEGATE,
+            Some(&token),
+            None,
+            Some(dir.path()),
+        )
+        .unwrap();
+        assert_eq!(signed.signature, NEAR_DELEGATE_SIGNATURE);
+
+        for (receiver, max, expected) in [
+            ("other.near", "1", "receiver ft.example.near"),
+            ("ft.example.near", "0", "exceeds max_deposit"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (wallet_id, token) = near_agent(dir.path(), vec![delegate_limits(receiver, max)]);
+            let err = crate::ops::sign_delegate_action(
+                &wallet_id,
+                "near",
+                NEAR_DELEGATE,
+                Some(&token),
+                None,
+                Some(dir.path()),
+            )
+            .unwrap_err();
+            match err {
+                OwsLibError::Core(OwsError::PolicyDenied { reason, .. }) => {
+                    assert!(reason.contains(expected), "{reason}");
+                }
+                other => panic!("expected PolicyDenied, got: {other}"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_delegate_action_policy_context() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+        // Allow only a sign_transaction request carrying the delegate bytes and kind.
+        let script = vault.join("check-delegate.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nctx=$(cat)\n\
+                 case \"$ctx\" in *'\"raw_hex\":\"{NEAR_DELEGATE}\"'*) ;; *) echo '{{\"allow\": false, \"reason\": \"raw_hex\"}}'; exit 0;; esac\n\
+                 case \"$ctx\" in *'\"request_type\":\"sign_transaction\"'*) ;; *) echo '{{\"allow\": false, \"reason\": \"request_type\"}}'; exit 0;; esac\n\
+                 case \"$ctx\" in *'\"kind\":\"delegate_action\"'*) echo '{{\"allow\": true}}';; *) echo '{{\"allow\": false, \"reason\": \"kind\"}}';; esac\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (wallet_id, _) = near_agent(vault, vec![]);
+        let policy = ows_core::Policy {
+            id: "delegate-ctx".to_string(),
+            name: "delegate context".to_string(),
+            version: 1,
+            created_at: "2026-03-22T00:00:00Z".to_string(),
+            rules: vec![],
+            executable: Some(script.display().to_string()),
+            config: None,
+            action: ows_core::PolicyAction::Deny,
+        };
+        policy_store::save_policy(&policy, Some(vault)).unwrap();
+        let (token, _) = create_api_key(
+            "delegate-ctx-key",
+            std::slice::from_ref(&wallet_id),
+            &["delegate-ctx".to_string()],
+            "",
+            None,
+            Some(vault),
+        )
+        .unwrap();
+        let signed = crate::ops::sign_delegate_action(
+            &wallet_id,
+            "near",
+            NEAR_DELEGATE,
+            Some(&token),
+            None,
+            Some(vault),
+        )
+        .unwrap();
+        assert_eq!(signed.signature, NEAR_DELEGATE_SIGNATURE);
+    }
+
+    #[test]
+    fn sign_delegate_action_rejects_bad_input_before_decrypting() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+        let (wallet_id, token) = near_agent(vault, vec![]);
+
+        // Non-NEAR chain, through the public entry point and the agent entry point.
+        for credential in ["", token.as_str()] {
+            let err = crate::ops::sign_delegate_action(
+                &wallet_id,
+                "solana",
+                NEAR_DELEGATE,
+                Some(credential),
+                None,
+                Some(vault),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("only supported for NEAR chains"),
+                "{err}"
+            );
+        }
+        let err = sign_delegate_action_with_api_key(
+            &token,
+            &wallet_id,
+            &ows_core::parse_chain("solana").unwrap(),
+            &hex::decode(NEAR_DELEGATE).unwrap(),
+            None,
+            Some(vault),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("only supported for NEAR chains"),
+            "{err}"
+        );
+
+        // Not hex, and hex that is not a delegate action (here: a transaction).
+        let err =
+            crate::ops::sign_delegate_action(&wallet_id, "near", "zz", Some(""), None, Some(vault))
+                .unwrap_err();
+        assert!(matches!(err, OwsLibError::InvalidInput(_)), "{err}");
+        // A wrong passphrase would fail decryption; the structure check runs first.
+        let err = crate::ops::sign_delegate_action(
+            &wallet_id,
+            "near",
+            NEAR_TX,
+            Some("wrong-passphrase"),
+            None,
+            Some(vault),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                OwsLibError::Signer(ows_signer::SignerError::InvalidTransaction(_))
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn sign_delegate_action_refuses_a_delegate_for_another_key() {
+        // A wallet with a different NEAR key cannot sign a delegate naming the RFC 8032 key.
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+        let wallet = crate::ops::import_wallet_private_key(
+            "other-near-key",
+            &"01".repeat(32),
+            Some("near"),
+            None,
+            Some(vault),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let err = crate::ops::sign_delegate_action(
+            &wallet.id,
+            "near",
+            NEAR_DELEGATE,
+            Some(""),
+            None,
+            Some(vault),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("is not the signing key"), "{err}");
     }
 }

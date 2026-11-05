@@ -127,8 +127,8 @@ pub(crate) const RAW_ED25519_NAMESPACES: &[&str] = &["solana", "ton"];
 /// so any raw Ed25519 signature over 32 caller-chosen bytes could authorize one.
 ///
 /// On a `near:` chain:
-/// - `sign_transaction` is checked against the decoded transaction the NEAR
-///   signer puts in `chain_extra` (deny if it is missing);
+/// - `sign_transaction` is checked against the decoded transaction (or NEP-366
+///   delegate action) the NEAR signer puts in `chain_extra` (deny if missing);
 /// - `sign_message` is denied when the message is exactly 32 bytes;
 /// - `sign_hash` is denied (defense in depth: OWS only signs raw hashes on
 ///   secp256k1 chains today).
@@ -206,13 +206,18 @@ fn check_near_transaction(
         .transaction
         .as_ref()
         .and_then(|tx| tx.chain_extra.as_ref())
-        .filter(|extra| extra.get("kind").and_then(Value::as_str) == Some("transaction"))
+        .filter(|extra| {
+            matches!(
+                extra.get("kind").and_then(Value::as_str),
+                Some("transaction" | "delegate_action")
+            )
+        })
         .ok_or("NEAR transaction was not decoded, so its limits cannot be checked")?;
     check_near_actions(limits, tx)
 }
 
-/// Check a decoded NEAR transaction (`receiver_id`, `actions`, `total_deposit`)
-/// against the limits.
+/// Check a decoded NEAR transaction or delegate action (`receiver_id`,
+/// `actions`, `total_deposit`) against the limits.
 fn check_near_actions(limits: &NearTransactionLimits, tx: &Value) -> Result<(), String> {
     let receiver = tx
         .get("receiver_id")
@@ -1027,6 +1032,25 @@ mod tests {
         let mut no_tx = near_tx_context(ft_transfer_tx());
         no_tx.transaction = None;
         assert!(!eval_near(NearTransactionLimits::default(), &no_tx).allow);
+    }
+
+    #[test]
+    fn near_limits_apply_to_delegate_actions_being_signed() {
+        // NEP-366: the delegate's own receiver, actions and deposits are checked.
+        let mut delegate = ft_transfer_tx();
+        delegate["kind"] = serde_json::json!("delegate_action");
+        let ok = NearTransactionLimits {
+            receivers: strings(&["ft.example.near"]),
+            methods: strings(&["ft_transfer"]),
+            max_deposit: Some("10".into()),
+            actions: None,
+        };
+        assert!(eval_near(ok.clone(), &near_tx_context(delegate.clone())).allow);
+        let low = NearTransactionLimits {
+            max_deposit: Some("9".into()),
+            ..ok
+        };
+        assert!(!eval_near(low, &near_tx_context(delegate)).allow);
     }
 
     #[test]

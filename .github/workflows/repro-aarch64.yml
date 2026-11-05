@@ -21,11 +21,6 @@ jobs:
           repository: open-wallet-standard/core
           ref: ${{ matrix.ref }}
 
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
-        with:
-          python-version: |
-            3.9
-            3.13
 
       - name: Build (baseline, as release.yml)
         if: matrix.variant == 'baseline'
